@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# raw personal data - keep out of version control
+data/raw/*
+!data/raw/.gitkeep
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# notebooks
+.ipynb_checkpoints/
+
+# os
+.DS_Store
