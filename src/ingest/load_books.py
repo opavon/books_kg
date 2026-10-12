@@ -1,14 +1,15 @@
 """
 Load books.csv into Neo4j.
 
-Expects data/raw/books.csv with columns: title, author, year_month, score
+Expects a CSV in data/raw with columns: title, author, year_month, score
   - year_month formatted like "2023_06"
   - score numeric (e.g. 1-5 or 1-10, whatever scale you used)
 
 Usage:
-    python src/ingest/load_books.py
+        python src/ingest/load_books.py [csv_filename]
 """
 
+import argparse
 import csv
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ NEO4J_URI = os.environ["NEO4J_URI"]
 NEO4J_USER = os.environ["NEO4J_USER"]
 NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
 
-CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "raw" / "books.csv"
+RAW_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
 
 LOAD_QUERY = """
 MERGE (a:Author {name: $author})
@@ -41,8 +42,8 @@ def normalize_author(name: str) -> str:
 
 def to_neo4j_date(year_month: str) -> str:
     """'2023_06' -> '2023_06_01' (Neo4j date() needs a full date)."""
-    year_month = year_month.strip()
-    return f"{year_month}_01"
+    year, month = year_month.strip().split("_")
+    return f"{year}-{month}-01"
 
 
 def load_rows(csv_path: Path):
@@ -62,8 +63,18 @@ def load_rows(csv_path: Path):
 
 
 def main():
-    rows = load_rows(CSV_PATH)
-    print(f"Loaded {len(rows)} rows from {CSV_PATH}")
+    parser = argparse.ArgumentParser(description="Load a books CSV from data/raw into Neo4j.")
+    parser.add_argument(
+        "csv_filename",
+        nargs="?",
+        default="books.csv",
+        help="CSV filename inside data/raw (default: books.csv)",
+    )
+    args = parser.parse_args()
+    csv_path = RAW_DATA_DIR / args.csv_filename
+
+    rows = load_rows(csv_path)
+    print(f"Loaded {len(rows)} rows from {csv_path}")
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     try:
