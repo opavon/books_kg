@@ -38,7 +38,7 @@ represents a reading *event* - this keeps the door open for re-reads later
 even though we're not modeling them for now, and it's the natural place to
 hang the date + score without cluttering `Book`.
 
-There is no `User`/"me" node - this graph is single-reader, so it's implicit.
+There is no `User/"me"` node - this graph is single-reader, so it's implicit.
 
 ## Schema (v2 - enrichment, added later)
 
@@ -89,52 +89,129 @@ books_kg/
 
 ## Setup
 
-1. **Get Neo4j running** - easiest is [Neo4j Desktop](https://neo4j.com/download/)
-   or a free [AuraDB Free](https://neo4j.com/cloud/aura-free/) instance. Note
-   the connection URI, username, and password.
+### 1. Start Neo4j
 
-2. **Python environment** 
-   
-   - install [uv](https://docs.astral.sh/uv/getting-started/installation/), 
-   
-   ```powershell
-   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-   ```
+For a local database, install [Neo4j Desktop](https://neo4j.com/download/), create
+an instance, and start it. Opening Desktop does not necessarily start the
+database instance. When creating the instance, choose a database username and
+password. A Neo4j website sign-in, if Desktop asks for one, is separate from
+these database credentials. A local Desktop database does not require an Aura
+cloud database.
 
-   - then sync the project dependencies:
+Find the Bolt connection URI in the instance's **Overview** (commonly
+`bolt://localhost:7687`) and note the database credentials. Use the same
+instance and database when applying constraints, loading data, and running
+queries. The default database is usually `neo4j`.
 
-   ```bash
-   uv sync
-   ```
+### 2. Set up Python and credentials
 
-3. **Credentials** - copy `.env.example` to `.env` and fill in your Neo4j
-   connection details (never commit `.env`).
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed.
+On Windows, you can install it from PowerShell:
 
-4. **Apply constraints**
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
-   Open Neo4j Browser (or `cypher-shell`) and run the contents of
-   `schema/constraints.cypher`.
+From the project root, sync dependencies:
 
-5. **Export your data** from Access to CSV with columns
-   `title, author, year_month, score`, save it to `data/raw/books_raw_<date>.csv`.
+```powershell
+uv sync
+```
 
-6. **Load it**
+Copy `.env.example` to `.env` and enter the local instance's connection URI,
+username, and password:
 
-   ```bash
-   uv run python src/ingest/load_books.py
-   ```
+```powershell
+Copy-Item .env.example .env
+```
 
-7. **Explore** - open Neo4j Browser and try the queries in
-   `src/queries/analytics.cypher`, or run them from Python/a notebook.
+Never commit `.env` or share its password. `NEO4J_DB_NAME` is present in the
+example file, but the current loader does not use it; it connects to Neo4j's
+default database.
+
+### 3. Apply schema constraints
+
+In Neo4j Desktop, make sure the instance is running, then choose **Connect →
+Query** on its card and select the default database (usually `neo4j`). 
+On VS Code, open `schema/constraints.cypher`, select and copy each `CREATE CONSTRAINT` statement through its semicolon.
+Back in Neo4j Desktop Query, paste and run one `CREATE CONSTRAIN` statement at a time.
+The `//` lines are comments and don’t need to be run.
+
+You can also run the whole file with `cypher-shell` from the project root:
+
+```powershell
+cypher-shell -a bolt://localhost:7687 -u neo4j -d neo4j -f schema/constraints.cypher
+```
+
+Use your instance's Bolt URI, username, and target database if they differ.
+Omitting `-p` lets Cypher Shell prompt for the password instead of putting it
+in the command or shell history. If `cypher-shell` is not on `PATH`, run it
+from the Neo4j installation's `bin` directory or use the Desktop Query tool.
+The statements use `IF NOT EXISTS`, so rerunning them is safe. To check them,
+run:
+
+```cypher
+SHOW CONSTRAINTS;
+```
+
+### 4. Prepare and load the CSV
+
+Export your data to CSV with these exact column headers:
+`title, author, year_month, score`. Use `YYYY_MM` for `year_month` (for example,
+`2006_02`) and a numeric score. The loader converts that month to the first day
+of the month for Neo4j's date value.
+
+Save the file in `data/raw/`, for example as
+`data/raw/books_raw_20261001.csv`. From the project root, pass its filename to
+the loader:
+
+```powershell
+uv run python src/ingest/load_books.py books_raw_20261001.csv
+```
+
+The filename argument is just the filename, not the `data/raw/` path. If
+omitted, the loader uses `data/raw/books.csv`. With an already activated
+environment, you can use `python` instead of `uv run python`.
+
+The loader creates a new `Read` node per CSV row. Run it only once for a given
+dataset unless you intend to add those reading events again. Each row is sent
+as its own query, so if a load fails partway through, earlier rows may already
+be in the database. Check the database before retrying to avoid duplicate
+reading events:
+
+```cypher
+MATCH (r:Read) RETURN count(r) AS reads;
+```
+
+### 5. Explore the data
+
+Open the Query tool for the same instance and database. Run queries from
+`src/queries/analytics.cypher` one at a time. Queries 1 and 2 need no input.
+Query 3 uses the `$title` parameter; set it in your query tool (for example,
+`Dune`) or replace `$title` with a title from your data. Query 4 requires the
+Phase 2 genre nodes and relationships, so it will not return results until
+genre enrichment has been added.
+
+To visualize the graph, run a query that returns a path, then choose the
+**Graph** results view:
+
+```cypher
+MATCH p = (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
+RETURN p
+LIMIT 25;
+```
+
+Increase or remove the limit to display more of the graph.
 
 ## Roadmap
 
 - [x] Phase 1: core schema - Author, Book, Read
-- [ ] Phase 1: ingest script + constraints
-- [ ] Phase 1: four analytics queries working end-to-end
+- [x] Phase 1: ingest script, constraints, and initial data load
+- [x] Phase 1: verify core analytics queries 1-3 end-to-end
 - [ ] Phase 2: enrich with genre, summary, author gender/nationality
       (Wikidata / Open Library / Google Books)
+- [ ] Phase 2: author similarity using shared genres (query 4)
 - [ ] Phase 2: bias check - distribution of reads/scores by author gender
       and nationality
-- [ ] Phase 3: similarity & recommendations (Neo4j Graph Data Science -
-      node similarity over shared genres, or a co-read graph)
+- [ ] Phase 3: recommendations using Neo4j Graph Data Science (for example,
+  node similarity or a co-read graph)
