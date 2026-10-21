@@ -12,7 +12,7 @@ The CSV is the source of truth for books you have read. Wikidata supplies option
 
 1. Install Neo4j Desktop from [neo4j.com/download](https://neo4j.com/download/) if you do not already have it.
 2. In Desktop, create a local DBMS and start it. A DBMS is the local database server; it must be running while you apply the schema or run either script.
-3. Use the default database (commonly named `neo4j`), or create/use the database name you prefer. Record the Bolt URI, database name, username, and password. A common local URI is `bolt://localhost:7687`.
+3. Use the default database (commonly named `neo4j`), or create/use the database name you prefer. Record the Bolt URI, database name, username, and password. A common local URI is `bolt://localhost:7687`. The database name must already exist in the running DBMS; `books_kg` is not created automatically by these scripts.
 
 Use that same DBMS and database for the schema, ingestion, enrichment, and queries. Do not use your Neo4j website sign-in as the database password.
 
@@ -34,7 +34,7 @@ NEO4J_PASSWORD=your-local-database-password
 NEO4J_DB_NAME=neo4j
 ```
 
-Set `NEO4J_DB_NAME` to the database name you selected in Neo4j Desktop. Keep `.env` private; do not commit it or paste its password into messages. The raw CSV is also ignored by Git because it contains personal reading data.
+Set `NEO4J_DB_NAME` to the database name you selected in Neo4j Desktop, and `NEO4J_URI` to the connection URI in Neo4j Desktop. Keep `.env` private; do not commit it or paste its password into messages. The raw CSV is also ignored by Git because it contains personal reading data.
 
 ## 3. Apply the Graph Schema
 
@@ -94,13 +94,18 @@ Make sure Neo4j is running and `.env` points to the correct database. From the r
 uv run python src/ingest/load_books.py
 ```
 
+or, if already on a terminal with the activated uv environment, run"
+
+```powershell
+python src/ingest/load_books.py
+```
+
 The loader validates the entire CSV before it writes anything. If it reports invalid rows, correct the CSV and rerun; it will not load only the valid subset. On success it reports inserted, updated, and unchanged rows. Rerunning the same cumulative file is safe: existing `Book` and `Read` nodes are matched by `books_id`, and authors and relationships are merged rather than duplicated.
 
-### Existing Phase 1 Graphs
-
-If the graph contains Books created before `books_id` was added, the loader attempts a conservative migration by matching their title to exactly one CSV row. It assigns that ID to the Book and its existing Read. It does not guess when the title is missing, ambiguous, or has multiple legacy Read nodes.
-
-If a legacy problem could collide with a title in the CSV, ingestion stops with the title and reason. Resolve that graph record manually in Neo4j before rerunning. No graph records are deleted by this migration. Old slash-combined Author nodes are retained and marked as legacy; separate canonical author nodes and links are added. Analytics ignore the marked legacy nodes.
+Start with a fresh database and apply the constraints before the first import.
+The CSV already contains a stable `books_id` for every row, so the loader does
+not migrate data from an older title-keyed graph. Slash-separated authors in
+the CSV are normalized into separate Author nodes and `WROTE` relationships.
 
 ## 6. Enrich the Graph
 
@@ -164,7 +169,6 @@ To display a small graph, run this in Query and select the **Graph** results vie
 
 ```cypher
 MATCH p = (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
-WHERE coalesce(a.legacy_composite, false) = false
 RETURN p
 LIMIT 25;
 ```
@@ -173,7 +177,7 @@ LIMIT 25;
 
 - **Connection refused:** Check that the Neo4j DBMS is started and that `NEO4J_URI` uses its Bolt address.
 - **Authentication/database error:** Check `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DB_NAME` in `.env`. Confirm the database exists and is selected in the Query tool.
+- **Database not found:** `NEO4J_DB_NAME` in `.env` must match a database that already exists in this DBMS. For a typical Neo4j Desktop setup, change `NEO4J_DB_NAME=books_kg` to `NEO4J_DB_NAME=neo4j`. Alternatively, create a database named `books_kg` in Neo4j Desktop. Save `.env` and rerun the script.
 - **Missing or invalid CSV data:** Check the header row and the line numbers in the loader error. No CSV rows are written if validation fails.
-- **Legacy title collision:** Read the reported title and reason. The loader intentionally stops rather than risk duplicating a legacy Book; review the existing graph record before retrying.
 - **No genre/similarity results:** Run enrichment, then inspect the review report. Some books may not have an unambiguous Wikidata match or genre claim.
 - **Some reads are not in gender/citizenship groups:** Those queries intentionally include only authors with accepted enrichment facts.

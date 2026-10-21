@@ -117,13 +117,10 @@ finite decimal scores, and splits author names on `/`. Re-running the same
 file is idempotent: Books and Reads are merged by `books_id`, and Authors
 and relationships are merged by normalized name.
 
-Legacy Books without IDs are backfilled only when exactly one CSV row has
-the same title and the legacy Book has at most one Read. Ambiguous titles,
-unmatched titles, or multiple legacy Reads are reported. If an unresolved
-legacy title collides with an incoming row, ingestion stops rather than
-creating a possible duplicate. Legacy slash-combined Author nodes are
-retained for audit, marked `legacy_composite`, and linked canonical Authors
-are added; analytics exclude the marked nodes.
+Start with a fresh database and apply the constraints before the first load.
+Every source row must have a stable `books_id`; ingestion does not migrate
+Books or Reads from an older title-keyed schema. The source CSV splits authors
+with `/`, and ingestion creates one Author node and `WROTE` relationship per name.
 
 Wikidata is the primary enrichment source. Only one exact-label candidate
 of the expected entity type is auto-accepted; ambiguous and missing matches

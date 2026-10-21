@@ -12,13 +12,9 @@ from src.enrich.wikidata_enrich import (
     year_from_claims,
 )
 from src.ingest.load_books import (
-    BACKFILL_BOOK_QUERY,
     EXISTING_QUERY,
-    LEGACY_BOOKS_QUERY,
     UPSERT_QUERY,
     load_rows,
-    migrate_legacy_books,
-    sync_rows,
     upsert_batch,
 )
 
@@ -66,28 +62,6 @@ class InMemoryTransaction:
                 }
             return FakeResult()
         raise AssertionError(f"Unexpected query: {query}")
-
-
-class FakeLegacyTransaction:
-    def __init__(self, legacy_books):
-        self.legacy_books = legacy_books
-        self.backfilled = []
-
-    def run(self, query, **parameters):
-        if query == LEGACY_BOOKS_QUERY:
-            return FakeResult(self.legacy_books)
-        if query == BACKFILL_BOOK_QUERY:
-            self.backfilled.append(parameters)
-            return FakeResult()
-        raise AssertionError(f"Unexpected query: {query}")
-
-
-class FakeSession:
-    def __init__(self, transaction):
-        self.transaction = transaction
-
-    def execute_write(self, callback, *arguments):
-        return callback(self.transaction, *arguments)
 
 
 class FakeWikidataClient(WikidataClient):
@@ -209,43 +183,6 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(upsert_batch(transaction, [changed]), {"inserted": 0, "updated": 1, "unchanged": 0})
         self.assertIn("MERGE (b:Book {books_id: row.books_id})", UPSERT_QUERY)
         self.assertIn("MERGE (r:Read {books_id: row.books_id})", UPSERT_QUERY)
-
-    def test_legacy_backfill_only_migrates_unambiguous_single_read(self):
-        transaction = FakeLegacyTransaction(
-            [
-                {"element_id": "1", "title": "Unique", "read_count": 1},
-                {"element_id": "2", "title": "Duplicate", "read_count": 1},
-                {"element_id": "3", "title": "Many reads", "read_count": 2},
-                {"element_id": "4", "title": "Missing", "read_count": 0},
-            ]
-        )
-        rows = [
-            {"books_id": "01", "title": "Unique"},
-            {"books_id": "02", "title": "Duplicate"},
-            {"books_id": "03", "title": "Duplicate"},
-            {"books_id": "04", "title": "Many reads"},
-        ]
-        result = migrate_legacy_books(transaction, rows)
-        self.assertEqual(result["migrated"], 1)
-        self.assertEqual(transaction.backfilled, [{"element_id": "1", "books_id": "01"}])
-        self.assertEqual(
-            [issue["reason"] for issue in result["unresolved"]],
-            ["ambiguous title", "multiple legacy Read nodes", "unmatched"],
-        )
-
-    def test_unresolved_legacy_title_collision_blocks_ingestion(self):
-        transaction = FakeLegacyTransaction(
-            [{"element_id": "1", "title": "Title", "read_count": 2}]
-        )
-        row = {
-            "books_id": "01",
-            "title": "Title",
-            "authors": ["A"],
-            "date": "2024-01-01",
-            "score": 8.0,
-        }
-        with self.assertRaisesRegex(ValueError, "multiple legacy Read nodes"):
-            sync_rows(FakeSession(transaction), [row])
 
     def test_wikidata_accepts_one_exact_human_only(self):
         person = {

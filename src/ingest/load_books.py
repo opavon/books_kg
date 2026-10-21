@@ -40,39 +40,6 @@ RETURN books_id, b.title AS title, r.date AS date, r.score AS score,
        collect(DISTINCT a.name) AS authors
 """
 
-LEGACY_BOOKS_QUERY = """
-MATCH (b:Book)
-WHERE b.books_id IS NULL
-OPTIONAL MATCH (r:Read)-[:OF_BOOK]->(b)
-RETURN elementId(b) AS element_id, b.title AS title, count(r) AS read_count
-"""
-
-BACKFILL_BOOK_QUERY = """
-MATCH (b:Book) WHERE elementId(b) = $element_id
-SET b.books_id = $books_id
-WITH b
-OPTIONAL MATCH (r:Read)-[:OF_BOOK]->(b)
-WITH b, collect(r) AS reads
-FOREACH (r IN reads | SET r.books_id = b.books_id)
-"""
-
-LEGACY_AUTHORS_QUERY = """
-MATCH (legacy:Author)-[:WROTE]->(b:Book)
-WHERE legacy.legacy_composite IS NULL AND legacy.name CONTAINS "/"
-RETURN legacy.name AS name, collect(DISTINCT b.books_id) AS books_ids
-"""
-
-BACKFILL_AUTHORS_QUERY = """
-MATCH (legacy:Author {name: $legacy_name})-[:WROTE]->(b:Book)
-WHERE b.books_id IN $books_ids
-UNWIND $authors AS author_name
-MERGE (canonical:Author {name: author_name})
-MERGE (canonical)-[:WROTE]->(b)
-WITH DISTINCT legacy
-SET legacy.legacy_composite = true
-"""
-
-
 def normalize_author(name: str) -> list[str]:
     authors = [part.strip() for part in name.split("/")]
     if not name.strip() or any(not author for author in authors):
@@ -160,50 +127,6 @@ def load_rows(csv_path: Path) -> list[dict]:
     return rows
 
 
-def migrate_legacy_books(tx, rows: list[dict]) -> dict:
-    rows_by_title = {}
-    for row in rows:
-        rows_by_title.setdefault(row["title"], []).append(row)
-
-    candidates = list(tx.run(LEGACY_BOOKS_QUERY))
-    migrated = []
-    unresolved = []
-    for legacy in candidates:
-        matches = rows_by_title.get(legacy["title"], [])
-        if len(matches) != 1:
-            unresolved.append(
-                {"title": legacy["title"], "reason": "unmatched" if not matches else "ambiguous title"}
-            )
-        elif legacy["read_count"] > 1:
-            unresolved.append({"title": legacy["title"], "reason": "multiple legacy Read nodes"})
-        else:
-            migrated.append(
-                {"element_id": legacy["element_id"], "books_id": matches[0]["books_id"]}
-            )
-
-    for item in migrated:
-        tx.run(BACKFILL_BOOK_QUERY, **item).consume()
-    return {"migrated": len(migrated), "unresolved": unresolved}
-
-
-def migrate_legacy_authors(tx) -> int:
-    composites = list(tx.run(LEGACY_AUTHORS_QUERY))
-    migrated = 0
-    for composite in composites:
-        authors = normalize_author(composite["name"])
-        book_ids = [book_id for book_id in composite["books_ids"] if book_id is not None]
-        if not book_ids:
-            continue
-        tx.run(
-            BACKFILL_AUTHORS_QUERY,
-            legacy_name=composite["name"],
-            authors=authors,
-            books_ids=book_ids,
-        ).consume()
-        migrated += 1
-    return migrated
-
-
 def upsert_batch(tx, rows: list[dict]) -> dict:
     existing = {
         record["books_id"]: record
@@ -232,33 +155,11 @@ def upsert_batch(tx, rows: list[dict]) -> dict:
 
 
 def sync_rows(session, rows: list[dict]) -> dict:
-    migration = session.execute_write(migrate_legacy_books, rows)
-    blocked_titles = {
-        issue["title"]
-        for issue in migration["unresolved"]
-        if issue["title"] in {row["title"] for row in rows}
-    }
-    if blocked_titles:
-        issues = [
-            f"{issue['title']!r}: {issue['reason']}"
-            for issue in migration["unresolved"]
-            if issue["title"] in blocked_titles
-        ]
-        raise ValueError("Cannot ingest until legacy title matches are reviewed: " + "; ".join(issues))
-    author_migrations = session.execute_write(migrate_legacy_authors)
-    if migration["unresolved"]:
-        print("Legacy books needing manual review:")
-        for issue in migration["unresolved"]:
-            print(f"  {issue['title']!r}: {issue['reason']}")
-
     totals = {"inserted": 0, "updated": 0, "unchanged": 0}
     for start in range(0, len(rows), BATCH_SIZE):
         batch_counts = session.execute_write(upsert_batch, rows[start : start + BATCH_SIZE])
         for key, value in batch_counts.items():
             totals[key] += value
-    totals["legacy_books_migrated"] = migration["migrated"]
-    totals["legacy_authors_migrated"] = author_migrations
-    totals["legacy_books_unresolved"] = len(migration["unresolved"])
     return totals
 
 

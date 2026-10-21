@@ -24,10 +24,9 @@ BOOK_TYPES = {"Q571", "Q7725634", "Q47461344"}
 
 DUE_AUTHORS_QUERY = """
 MATCH (a:Author)
-WHERE coalesce(a.legacy_composite, false) = false AND (
-      $refresh OR a.wikidata_status IS NULL OR a.wikidata_status <> 'matched'
+WHERE $refresh OR a.wikidata_status IS NULL OR a.wikidata_status <> 'matched'
    OR a.wikidata_checked_at IS NULL
-   OR a.wikidata_checked_at < datetime() - duration({days: $stale_days}))
+   OR a.wikidata_checked_at < datetime() - duration({days: $stale_days})
 RETURN a.name AS name, a.wikidata_id AS wikidata_id
 ORDER BY a.name
 """
@@ -39,7 +38,6 @@ WHERE b.books_id IS NOT NULL AND (
    OR b.wikidata_checked_at IS NULL
    OR b.wikidata_checked_at < datetime() - duration({days: $stale_days}))
 OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
-WHERE coalesce(a.legacy_composite, false) = false
 RETURN b.books_id AS books_id, b.title AS title, b.wikidata_id AS wikidata_id,
        b.summary AS summary,
        collect(DISTINCT {name: a.name, wikidata_id: a.wikidata_id}) AS authors

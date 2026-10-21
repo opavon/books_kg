@@ -41,12 +41,8 @@ For example, from PowerShell:
 cypher-shell -a bolt://localhost:7687 -u neo4j -d neo4j -f schema/constraints.cypher
 ```
 
-Omitting `-p` lets Cypher Shell prompt for the password. For existing Phase 1
-data, the loader performs a conservative title-based ID backfill before import.
-Review any reported unmatched, ambiguous, or multi-Read legacy records; incoming
-rows with unresolved title collisions are blocked to prevent duplicate Books.
-Legacy slash-combined Author nodes are retained and marked `legacy_composite`;
-their canonical individual Authors are linked and analytics ignore the old nodes.
+Omitting `-p` lets Cypher Shell prompt for the password. Start with a fresh
+database and apply the constraints before the first CSV load.
 
 ## Cumulative CSV
 
@@ -101,9 +97,8 @@ For each update to the cumulative CSV:
 
 1. Apply `schema/constraints.cypher` (safe to repeat).
 2. Run `uv run python src/ingest/load_books.py`.
-3. Resolve any blocked legacy title collisions or review rows.
-4. Run `uv run python src/enrich/wikidata_enrich.py` and review `data/reports/`.
-5. Run the desired queries from `src/queries/analytics.cypher`.
+3. Run `uv run python src/enrich/wikidata_enrich.py` and review `data/reports/`.
+4. Run the desired queries from `src/queries/analytics.cypher`.
 
 The enrichment script skips fresh successful matches, retries unresolved
 entities, and refreshes accepted matches after 180 days. `--refresh` forces
@@ -115,7 +110,6 @@ To visualize the graph in Neo4j Browser, run a query that returns a path:
 
 ```cypher
 MATCH p = (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
-WHERE coalesce(a.legacy_composite, false) = false
 RETURN p
 LIMIT 25;
 ```
