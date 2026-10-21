@@ -33,15 +33,15 @@ ORDER BY a.name
 
 DUE_BOOKS_QUERY = """
 MATCH (b:Book)
-WHERE b.books_id IS NOT NULL AND (
+WHERE b.book_id IS NOT NULL AND (
       $refresh OR b.wikidata_status IS NULL OR b.wikidata_status <> 'matched'
    OR b.wikidata_checked_at IS NULL
    OR b.wikidata_checked_at < datetime() - duration({days: $stale_days}))
 OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
-RETURN b.books_id AS books_id, b.title AS title, b.wikidata_id AS wikidata_id,
+RETURN b.book_id AS book_id, b.title AS title, b.wikidata_id AS wikidata_id,
        b.summary AS summary,
        collect(DISTINCT {name: a.name, wikidata_id: a.wikidata_id}) AS authors
-ORDER BY b.books_id
+ORDER BY b.book_id
 """
 
 UPDATE_AUTHOR_QUERY = """
@@ -52,7 +52,7 @@ FOREACH (_ IN CASE WHEN $wikidata_id IS NULL THEN [] ELSE [1] END |
 """
 
 UPDATE_BOOK_QUERY = """
-MATCH (b:Book {books_id: $books_id})
+MATCH (b:Book {book_id: $book_id})
 SET b.wikidata_status = $status, b.wikidata_checked_at = datetime()
 FOREACH (_ IN CASE WHEN $wikidata_id IS NULL THEN [] ELSE [1] END |
    SET b.wikidata_id = $wikidata_id)
@@ -79,7 +79,7 @@ MERGE (a)-[:CITIZEN_OF]->(c)
 """
 
 MERGE_GENRE_QUERY = """
-MATCH (b:Book {books_id: $books_id})
+MATCH (b:Book {book_id: $book_id})
 MERGE (g:Genre {name: $name})
 ON CREATE SET g.wikidata_id = $wikidata_id
 MERGE (b)-[:HAS_GENRE]->(g)
@@ -296,7 +296,7 @@ def write_author(tx, name: str, status: str, wikidata_id: str | None, genders: l
 def write_book(tx, record: dict) -> None:
    tx.run(UPDATE_BOOK_QUERY, **record).consume()
    for genre in record["genres"]:
-      tx.run(MERGE_GENRE_QUERY, books_id=record["books_id"], name=genre["name"], wikidata_id=genre["id"]).consume()
+      tx.run(MERGE_GENRE_QUERY, book_id=record["book_id"], name=genre["name"], wikidata_id=genre["id"]).consume()
 
 
 def append_review(reviews: list[dict], kind: str, key: str, label: str, status: str, candidates: list[dict], reason: str = "") -> None:
@@ -349,7 +349,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
       books = books[:limit]
    for book in books:
       title = book["title"]
-      key = book["books_id"]
+      key = book["book_id"]
       book_authors = [author for author in (book["authors"] or []) if author.get("name")]
       authors_for_book = [author["name"] for author in book_authors]
       author_ids = [author["wikidata_id"] for author in book_authors if author.get("wikidata_id")]
@@ -375,7 +375,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
                append_review(reviews, "book_summary", key, title, "error", [], str(exc))
 
          record = {
-            "books_id": key,
+            "book_id": key,
             "status": status,
             "wikidata_id": wikidata_id,
             "openlibrary_id": openlibrary_id,
@@ -393,7 +393,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          session.execute_write(
             write_book,
             {
-               "books_id": key,
+               "book_id": key,
                "status": "error",
                "wikidata_id": book["wikidata_id"],
                "openlibrary_id": None,

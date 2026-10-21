@@ -41,20 +41,20 @@ class InMemoryTransaction:
             return FakeResult(
                 [
                     {
-                        "books_id": books_id,
+                        "book_id": book_id,
                         "title": record["title"],
                         "date": FakeDate(record["date"]),
                         "score": record["score"],
                         "authors": record["authors"],
                     }
-                    for books_id in parameters["books_ids"]
-                    if (record := self.records.get(books_id)) is not None
+                    for book_id in parameters["book_ids"]
+                    if (record := self.records.get(book_id)) is not None
                 ]
             )
         if query == UPSERT_QUERY:
             for row in parameters["rows"]:
-                previous = self.records.get(row["books_id"], {})
-                self.records[row["books_id"]] = {
+                previous = self.records.get(row["book_id"], {})
+                self.records[row["book_id"]] = {
                     "title": row["title"],
                     "date": row["date"],
                     "score": row["score"],
@@ -103,7 +103,7 @@ class EnrichmentSession:
             return FakeResult(
                 [
                     {
-                        "books_id": "0001",
+                        "book_id": "0001",
                         "title": "A Novel",
                         "wikidata_id": None,
                         "summary": None,
@@ -136,42 +136,42 @@ class PipelineTests(unittest.TestCase):
 
     def test_csv_preserves_id_decimals_and_splits_authors(self):
         rows = self.parse_csv(
-            "books_id,title,author,year_month,score\n"
+            "book_id,title,author,year_month,score\n"
             "0007,Example,A / B,2024_02,8.5\n"
         )
-        self.assertEqual(rows[0]["books_id"], "0007")
+        self.assertEqual(rows[0]["book_id"], "0007")
         self.assertEqual(rows[0]["score"], 8.5)
         self.assertEqual(rows[0]["authors"], ["A", "B"])
         self.assertEqual(rows[0]["date"], "2024-02-01")
 
     def test_csv_reports_duplicate_ids_bad_dates_and_scores(self):
-        with self.assertRaisesRegex(ValueError, "line 3: duplicate books_id"):
+        with self.assertRaisesRegex(ValueError, "line 3: duplicate book_id"):
             self.parse_csv(
-                "books_id,title,author,year_month,score\n"
+                "book_id,title,author,year_month,score\n"
                 "001,One,A,2024_01,8\n"
                 "001,Two,B,2024_13,nan\n"
             )
 
     def test_csv_rejects_empty_author_segments(self):
         with self.assertRaisesRegex(ValueError, "nonblank names"):
-            self.parse_csv("books_id,title,author,year_month,score\n1,Title,A//B,2024_01,8\n")
+            self.parse_csv("book_id,title,author,year_month,score\n1,Title,A//B,2024_01,8\n")
 
     def test_csv_rejects_float_overflow(self):
         with self.assertRaisesRegex(ValueError, "finite number"):
-            self.parse_csv("books_id,title,author,year_month,score\n1,Title,A,2024_01,1e10000\n")
+            self.parse_csv("book_id,title,author,year_month,score\n1,Title,A,2024_01,1e10000\n")
 
     def test_csv_requires_all_columns(self):
         with self.assertRaisesRegex(ValueError, "missing required columns: score"):
-            self.parse_csv("books_id,title,author,year_month\n1,Title,A,2024_01\n")
+            self.parse_csv("book_id,title,author,year_month\n1,Title,A,2024_01\n")
 
     def test_csv_rejects_duplicate_headers(self):
         with self.assertRaisesRegex(ValueError, "duplicate column headers"):
-            self.parse_csv("books_id,title,author,year_month,score,score\n")
+            self.parse_csv("book_id,title,author,year_month,score,score\n")
 
     def test_reimport_is_idempotent_and_detects_updates(self):
         transaction = InMemoryTransaction()
         row = {
-            "books_id": "0001",
+            "book_id": "0001",
             "title": "Title",
             "authors": ["A", "B"],
             "date": "2024-01-01",
@@ -181,8 +181,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(upsert_batch(transaction, [row]), {"inserted": 0, "updated": 0, "unchanged": 1})
         changed = {**row, "score": 9.0}
         self.assertEqual(upsert_batch(transaction, [changed]), {"inserted": 0, "updated": 1, "unchanged": 0})
-        self.assertIn("MERGE (b:Book {books_id: row.books_id})", UPSERT_QUERY)
-        self.assertIn("MERGE (r:Read {books_id: row.books_id})", UPSERT_QUERY)
+        self.assertIn("MERGE (b:Book {book_id: row.book_id})", UPSERT_QUERY)
+        self.assertIn("MERGE (r:Read {book_id: row.book_id})", UPSERT_QUERY)
 
     def test_wikidata_accepts_one_exact_human_only(self):
         person = {

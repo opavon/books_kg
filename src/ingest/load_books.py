@@ -13,15 +13,15 @@ from neo4j import GraphDatabase
 
 RAW_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
 SOURCE_CSV = RAW_DATA_DIR / "books_raw_20261001.csv"
-REQUIRED_COLUMNS = {"books_id", "title", "author", "year_month", "score"}
+REQUIRED_COLUMNS = {"book_id", "title", "author", "year_month", "score"}
 BATCH_SIZE = 100
 
 UPSERT_QUERY = """
 UNWIND $rows AS row
-MERGE (b:Book {books_id: row.books_id})
+MERGE (b:Book {book_id: row.book_id})
 ON CREATE SET b.title = row.title
 ON MATCH SET b.title = row.title
-MERGE (r:Read {books_id: row.books_id})
+MERGE (r:Read {book_id: row.book_id})
 ON CREATE SET r.date = date(row.date), r.score = row.score
 ON MATCH SET r.date = date(row.date), r.score = row.score
 MERGE (r)-[:OF_BOOK]->(b)
@@ -32,11 +32,11 @@ MERGE (a)-[:WROTE]->(b)
 """
 
 EXISTING_QUERY = """
-UNWIND $books_ids AS books_id
-OPTIONAL MATCH (b:Book {books_id: books_id})
-OPTIONAL MATCH (r:Read {books_id: books_id})
+UNWIND $book_ids AS book_id
+OPTIONAL MATCH (b:Book {book_id: book_id})
+OPTIONAL MATCH (r:Read {book_id: book_id})
 OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
-RETURN books_id, b.title AS title, r.date AS date, r.score AS score,
+RETURN book_id, b.title AS title, r.date AS date, r.score AS score,
        collect(DISTINCT a.name) AS authors
 """
 
@@ -74,17 +74,17 @@ def load_rows(csv_path: Path) -> list[dict]:
 
         for line_number, raw in enumerate(reader, start=2):
             row_errors = []
-            books_id = (raw.get("books_id") or "").strip()
+            book_id = (raw.get("book_id") or "").strip()
             title = (raw.get("title") or "").strip()
             author_text = raw.get("author") or ""
             if None in raw:
                 row_errors.append("too many CSV fields")
-            if not books_id:
-                row_errors.append("books_id is blank")
-            elif books_id in seen_ids:
-                row_errors.append(f"duplicate books_id {books_id!r}")
+            if not book_id:
+                row_errors.append("book_id is blank")
+            elif book_id in seen_ids:
+                row_errors.append(f"duplicate book_id {book_id!r}")
             else:
-                seen_ids.add(books_id)
+                seen_ids.add(book_id)
             if not title:
                 row_errors.append("title is blank")
             try:
@@ -114,7 +114,7 @@ def load_rows(csv_path: Path) -> list[dict]:
             else:
                 rows.append(
                     {
-                        "books_id": books_id,
+                        "book_id": book_id,
                         "title": title,
                         "authors": authors,
                         "date": date_value,
@@ -129,13 +129,13 @@ def load_rows(csv_path: Path) -> list[dict]:
 
 def upsert_batch(tx, rows: list[dict]) -> dict:
     existing = {
-        record["books_id"]: record
-        for record in tx.run(EXISTING_QUERY, books_ids=[row["books_id"] for row in rows])
+        record["book_id"]: record
+        for record in tx.run(EXISTING_QUERY, book_ids=[row["book_id"] for row in rows])
         if record["title"] is not None
     }
     counts = {"inserted": 0, "updated": 0, "unchanged": 0}
     for row in rows:
-        previous = existing.get(row["books_id"])
+        previous = existing.get(row["book_id"])
         if previous is None:
             counts["inserted"] += 1
             continue

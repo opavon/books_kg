@@ -38,7 +38,7 @@ Set `NEO4J_DB_NAME` to the database name you selected in Neo4j Desktop, and `NEO
 
 ## 3. Apply the Graph Schema
 
-The schema file creates uniqueness constraints used by the loader to prevent duplicate authors, books, reads, genres, countries, and genders. It also removes the old title-based book constraint, because a stable `books_id` is now the book identity and title is display text.
+The schema file creates uniqueness constraints used by the loader to prevent duplicate authors, books, reads, genres, countries, and genders. It also removes the old title-based book constraint, because a stable `book_id` is now the book identity and title is display text.
 
 The easiest option is Neo4j Desktop's Query tool:
 
@@ -52,7 +52,7 @@ If `cypher-shell` is installed and available in PowerShell, you can run the whol
 cypher-shell -a bolt://localhost:7687 -u neo4j -d neo4j -f schema/constraints.cypher
 ```
 
-Cypher Shell prompts for the password when `-p` is omitted. The constraints use `IF NOT EXISTS` and can be applied again. The title constraint is explicitly dropped so the graph can use `books_id` for identity.
+Cypher Shell prompts for the password when `-p` is omitted. The constraints use `IF NOT EXISTS` and can be applied again. The title constraint is explicitly dropped so the graph can use `book_id` for identity.
 
 ## 4. Maintain the Cumulative CSV
 
@@ -65,7 +65,7 @@ data/raw/books_raw_20261001.csv
 Its header row must be:
 
 ```text
-books_id,title,author,year_month,score
+book_id,title,author,year_month,score
 ```
 
 Append one row per new book. The current data contains examples like:
@@ -76,7 +76,7 @@ Append one row per new book. The current data contains examples like:
 
 Follow these rules:
 
-- `books_id` must be unique, stable, and kept as text. Preserve leading zeros such as `0001`; do not reuse an ID for another book. If editing in Excel, format this column as Text before entering IDs and check the exported CSV.
+- `book_id` must be unique, stable, and kept as text. Preserve leading zeros such as `0001`; do not reuse an ID for another book. If editing in Excel, format this column as Text before entering IDs and check the exported CSV.
 - Add each book only once. This source models one `Read` per book; it does not represent rereads.
 - Keep the title as it appears in your data. It is display text, not the graph's identity key.
 - Separate multiple authors with `/`. The loader trims each name and creates a separate author node/relationship.
@@ -100,10 +100,10 @@ or, if already on a terminal with the activated uv environment, run"
 python src/ingest/load_books.py
 ```
 
-The loader validates the entire CSV before it writes anything. If it reports invalid rows, correct the CSV and rerun; it will not load only the valid subset. On success it reports inserted, updated, and unchanged rows. Rerunning the same cumulative file is safe: existing `Book` and `Read` nodes are matched by `books_id`, and authors and relationships are merged rather than duplicated.
+The loader validates the entire CSV before it writes anything. If it reports invalid rows, correct the CSV and rerun; it will not load only the valid subset. On success it reports inserted, updated, and unchanged rows. Rerunning the same cumulative file is safe: existing `Book` and `Read` nodes are matched by `book_id`, and authors and relationships are merged rather than duplicated.
 
 Start with a fresh database and apply the constraints before the first import.
-The CSV already contains a stable `books_id` for every row, so the loader does
+The CSV already contains a stable `book_id` for every row, so the loader does
 not migrate data from an older title-keyed graph. Slash-separated authors in
 the CSV are normalized into separate Author nodes and `WROTE` relationships.
 
@@ -153,7 +153,7 @@ Run query 1. It lists authors with more than three linked books and compares the
 
 ### Use Case: See What You Read Around a Book
 
-Query 3 takes a `$books_id` parameter. In the Query tool, set the parameter to an ID from the CSV, such as `0001`, then run it. It returns other books with reading dates within one month before or after the target book. Using the ID avoids problems when two books share a title.
+Query 3 takes a `$book_id` parameter. In the Query tool, set the parameter to an ID from the CSV, such as `0001`, then run it. It returns other books with reading dates within one month before or after the target book. Using the ID avoids problems when two books share a title.
 
 ### Use Case: Discover Authors with Shared Genres
 

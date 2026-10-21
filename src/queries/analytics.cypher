@@ -40,7 +40,7 @@ ORDER BY avgScore DESC;
 // 3. What did I read in the same period as book X?
 //    ("same period" = within 1 month either side; adjust as you like)
 // ---------------------------------------------------------------------
-MATCH (target:Book {books_id: $books_id})<-[:OF_BOOK]-(targetRead:Read)
+MATCH (target:Book {book_id: $book_id})<-[:OF_BOOK]-(targetRead:Read)
 MATCH (other:Book)<-[:OF_BOOK]-(r:Read)
 WHERE other <> target
   AND r.date >= targetRead.date - duration({months: 1})

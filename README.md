@@ -14,7 +14,7 @@ graph LR
     Author -->|CITIZEN_OF| Country
 ```
 
-`Book.books_id` is the stable source identity; `title` is display data. Each
+`Book.book_id` is the stable source identity; `title` is display data. Each
 book has one `Read` node keyed by the same ID. `Read.score` supports decimals.
 The complete model and provenance rules are in [schema/schema.md](schema/schema.md).
 
@@ -50,10 +50,10 @@ Maintain one append-only file at `data/raw/books_raw_20261001.csv` with these
 headers:
 
 ```text
-books_id,title,author,year_month,score
+book_id,title,author,year_month,score
 ```
 
-Keep `books_id` stable and unique, including leading zeros. Each book appears
+Keep `book_id` stable and unique, including leading zeros. Each book appears
 once. Use `YYYY_MM` for `year_month`; the day is set to `01`. Scores must be
 finite numbers and may be decimal. Separate authors with `/`; the loader trims
 each name and creates a separate author relationship.
@@ -65,7 +65,7 @@ project root, run:
 uv run python src/ingest/load_books.py
 ```
 
-Books and Reads are merged by `books_id`; Authors and relationships are merged.
+Books and Reads are merged by `book_id`; Authors and relationships are merged.
 Re-running the full cumulative file is safe and reports inserted, updated, and
 unchanged rows. Do not reuse a book ID for a different book.
 
@@ -102,7 +102,7 @@ For each update to the cumulative CSV:
 
 The enrichment script skips fresh successful matches, retries unresolved
 entities, and refreshes accepted matches after 180 days. `--refresh` forces
-refresh. Query 3 takes `$books_id`; query 4 requires genre data. Gender and
+refresh. Query 3 takes `$book_id`; query 4 requires genre data. Gender and
 citizenship analytics include only classified authors; a multi-author book may
 contribute to multiple categories.
 
