@@ -1,87 +1,283 @@
-"""
-Load books.csv into Neo4j.
+"""Validate and idempotently load the cumulative books CSV into Neo4j."""
 
-Expects a CSV in data/raw with columns: title, author, year_month, score
-  - year_month formatted like "2023_06"
-  - score numeric (e.g. 1-5 or 1-10, whatever scale you used)
-
-Usage:
-        python src/ingest/load_books.py [csv_filename]
-"""
-
-import argparse
 import csv
+import math
 import os
+import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
-load_dotenv()
-
-NEO4J_URI = os.environ["NEO4J_URI"]
-NEO4J_USER = os.environ["NEO4J_USER"]
-NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
-
 RAW_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
+SOURCE_CSV = RAW_DATA_DIR / "books_raw_20261001.csv"
+REQUIRED_COLUMNS = {"books_id", "title", "author", "year_month", "score"}
+BATCH_SIZE = 100
 
-LOAD_QUERY = """
-MERGE (a:Author {name: $author})
-MERGE (b:Book {title: $title})
+UPSERT_QUERY = """
+UNWIND $rows AS row
+MERGE (b:Book {books_id: row.books_id})
+ON CREATE SET b.title = row.title
+ON MATCH SET b.title = row.title
+MERGE (r:Read {books_id: row.books_id})
+ON CREATE SET r.date = date(row.date), r.score = row.score
+ON MATCH SET r.date = date(row.date), r.score = row.score
+MERGE (r)-[:OF_BOOK]->(b)
+WITH row, b
+UNWIND row.authors AS author_name
+MERGE (a:Author {name: author_name})
 MERGE (a)-[:WROTE]->(b)
-CREATE (r:Read {date: date($date), score: toInteger($score)})
-CREATE (r)-[:OF_BOOK]->(b)
+"""
+
+EXISTING_QUERY = """
+UNWIND $books_ids AS books_id
+OPTIONAL MATCH (b:Book {books_id: books_id})
+OPTIONAL MATCH (r:Read {books_id: books_id})
+OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
+RETURN books_id, b.title AS title, r.date AS date, r.score AS score,
+       collect(DISTINCT a.name) AS authors
+"""
+
+LEGACY_BOOKS_QUERY = """
+MATCH (b:Book)
+WHERE b.books_id IS NULL
+OPTIONAL MATCH (r:Read)-[:OF_BOOK]->(b)
+RETURN elementId(b) AS element_id, b.title AS title, count(r) AS read_count
+"""
+
+BACKFILL_BOOK_QUERY = """
+MATCH (b:Book) WHERE elementId(b) = $element_id
+SET b.books_id = $books_id
+WITH b
+OPTIONAL MATCH (r:Read)-[:OF_BOOK]->(b)
+WITH b, collect(r) AS reads
+FOREACH (r IN reads | SET r.books_id = b.books_id)
+"""
+
+LEGACY_AUTHORS_QUERY = """
+MATCH (legacy:Author)-[:WROTE]->(b:Book)
+WHERE legacy.legacy_composite IS NULL AND legacy.name CONTAINS "/"
+RETURN legacy.name AS name, collect(DISTINCT b.books_id) AS books_ids
+"""
+
+BACKFILL_AUTHORS_QUERY = """
+MATCH (legacy:Author {name: $legacy_name})-[:WROTE]->(b:Book)
+WHERE b.books_id IN $books_ids
+UNWIND $authors AS author_name
+MERGE (canonical:Author {name: author_name})
+MERGE (canonical)-[:WROTE]->(b)
+WITH DISTINCT legacy
+SET legacy.legacy_composite = true
 """
 
 
-def normalize_author(name: str) -> str:
-    """Basic cleanup - expand this as you find inconsistencies in your data.
-    e.g. collapse 'Tolkien, J.R.R.' vs 'J.R.R. Tolkien' to one form."""
-    return name.strip()
+def normalize_author(name: str) -> list[str]:
+    authors = [part.strip() for part in name.split("/")]
+    if not name.strip() or any(not author for author in authors):
+        raise ValueError("author must contain one or more nonblank names separated by '/'")
+    return list(dict.fromkeys(authors))
 
 
 def to_neo4j_date(year_month: str) -> str:
-    """'2023_06' -> '2023_06_01' (Neo4j date() needs a full date)."""
-    year, month = year_month.strip().split("_")
-    return f"{year}-{month}-01"
-
-
-def load_rows(csv_path: Path):
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = []
-        for row in reader:
-            rows.append(
-                {
-                    "title": row["title"].strip(),
-                    "author": normalize_author(row["author"]),
-                    "date": to_neo4j_date(row["year_month"]),
-                    "score": row["score"].strip(),
-                }
-            )
-        return rows
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Load a books CSV from data/raw into Neo4j.")
-    parser.add_argument(
-        "csv_filename",
-        nargs="?",
-        default="books.csv",
-        help="CSV filename inside data/raw (default: books.csv)",
-    )
-    args = parser.parse_args()
-    csv_path = RAW_DATA_DIR / args.csv_filename
-
-    rows = load_rows(csv_path)
-    print(f"Loaded {len(rows)} rows from {csv_path}")
-
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    match = re.fullmatch(r"(\d{4})_(\d{2})", year_month.strip())
+    if match is None:
+        raise ValueError("must use YYYY_MM format")
+    year, month = map(int, match.groups())
     try:
-        with driver.session() as session:
-            for row in rows:
-                session.run(LOAD_QUERY, **row)
-        print("Done. Rows written to Neo4j.")
+        return date(year, month, 1).isoformat()
+    except ValueError as exc:
+        raise ValueError("contains an invalid year or month") from exc
+
+
+def load_rows(csv_path: Path) -> list[dict]:
+    errors = []
+    rows = []
+    seen_ids = set()
+    with csv_path.open(newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames is None:
+            raise ValueError("CSV is empty or missing its header row")
+        if len(reader.fieldnames) != len(set(reader.fieldnames)):
+            raise ValueError("CSV contains duplicate column headers")
+        missing = REQUIRED_COLUMNS - set(reader.fieldnames)
+        if missing:
+            raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
+
+        for line_number, raw in enumerate(reader, start=2):
+            row_errors = []
+            books_id = (raw.get("books_id") or "").strip()
+            title = (raw.get("title") or "").strip()
+            author_text = raw.get("author") or ""
+            if None in raw:
+                row_errors.append("too many CSV fields")
+            if not books_id:
+                row_errors.append("books_id is blank")
+            elif books_id in seen_ids:
+                row_errors.append(f"duplicate books_id {books_id!r}")
+            else:
+                seen_ids.add(books_id)
+            if not title:
+                row_errors.append("title is blank")
+            try:
+                authors = normalize_author(author_text)
+            except ValueError as exc:
+                row_errors.append(str(exc))
+                authors = []
+            try:
+                date_value = to_neo4j_date(raw.get("year_month") or "")
+            except ValueError as exc:
+                row_errors.append(f"year_month {exc}")
+                date_value = ""
+            score_text = (raw.get("score") or "").strip()
+            try:
+                score_decimal = Decimal(score_text)
+                if not score_decimal.is_finite():
+                    raise InvalidOperation
+                score = float(score_decimal)
+                if not math.isfinite(score):
+                    raise InvalidOperation
+            except (InvalidOperation, ValueError, OverflowError):
+                row_errors.append("score must be a finite number")
+                score = 0.0
+
+            if row_errors:
+                errors.append(f"line {line_number}: {'; '.join(row_errors)}")
+            else:
+                rows.append(
+                    {
+                        "books_id": books_id,
+                        "title": title,
+                        "authors": authors,
+                        "date": date_value,
+                        "score": score,
+                    }
+                )
+
+    if errors:
+        raise ValueError("Invalid CSV rows; no data was written:\n" + "\n".join(errors))
+    return rows
+
+
+def migrate_legacy_books(tx, rows: list[dict]) -> dict:
+    rows_by_title = {}
+    for row in rows:
+        rows_by_title.setdefault(row["title"], []).append(row)
+
+    candidates = list(tx.run(LEGACY_BOOKS_QUERY))
+    migrated = []
+    unresolved = []
+    for legacy in candidates:
+        matches = rows_by_title.get(legacy["title"], [])
+        if len(matches) != 1:
+            unresolved.append(
+                {"title": legacy["title"], "reason": "unmatched" if not matches else "ambiguous title"}
+            )
+        elif legacy["read_count"] > 1:
+            unresolved.append({"title": legacy["title"], "reason": "multiple legacy Read nodes"})
+        else:
+            migrated.append(
+                {"element_id": legacy["element_id"], "books_id": matches[0]["books_id"]}
+            )
+
+    for item in migrated:
+        tx.run(BACKFILL_BOOK_QUERY, **item).consume()
+    return {"migrated": len(migrated), "unresolved": unresolved}
+
+
+def migrate_legacy_authors(tx) -> int:
+    composites = list(tx.run(LEGACY_AUTHORS_QUERY))
+    migrated = 0
+    for composite in composites:
+        authors = normalize_author(composite["name"])
+        book_ids = [book_id for book_id in composite["books_ids"] if book_id is not None]
+        if not book_ids:
+            continue
+        tx.run(
+            BACKFILL_AUTHORS_QUERY,
+            legacy_name=composite["name"],
+            authors=authors,
+            books_ids=book_ids,
+        ).consume()
+        migrated += 1
+    return migrated
+
+
+def upsert_batch(tx, rows: list[dict]) -> dict:
+    existing = {
+        record["books_id"]: record
+        for record in tx.run(EXISTING_QUERY, books_ids=[row["books_id"] for row in rows])
+        if record["title"] is not None
+    }
+    counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+    for row in rows:
+        previous = existing.get(row["books_id"])
+        if previous is None:
+            counts["inserted"] += 1
+            continue
+        old_authors = set(previous["authors"])
+        if (
+            previous["title"] != row["title"]
+            or previous["date"].iso_format() != row["date"]
+            or float(previous["score"]) != row["score"]
+            or not set(row["authors"]).issubset(old_authors)
+        ):
+            counts["updated"] += 1
+        else:
+            counts["unchanged"] += 1
+
+    tx.run(UPSERT_QUERY, rows=rows).consume()
+    return counts
+
+
+def sync_rows(session, rows: list[dict]) -> dict:
+    migration = session.execute_write(migrate_legacy_books, rows)
+    blocked_titles = {
+        issue["title"]
+        for issue in migration["unresolved"]
+        if issue["title"] in {row["title"] for row in rows}
+    }
+    if blocked_titles:
+        issues = [
+            f"{issue['title']!r}: {issue['reason']}"
+            for issue in migration["unresolved"]
+            if issue["title"] in blocked_titles
+        ]
+        raise ValueError("Cannot ingest until legacy title matches are reviewed: " + "; ".join(issues))
+    author_migrations = session.execute_write(migrate_legacy_authors)
+    if migration["unresolved"]:
+        print("Legacy books needing manual review:")
+        for issue in migration["unresolved"]:
+            print(f"  {issue['title']!r}: {issue['reason']}")
+
+    totals = {"inserted": 0, "updated": 0, "unchanged": 0}
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch_counts = session.execute_write(upsert_batch, rows[start : start + BATCH_SIZE])
+        for key, value in batch_counts.items():
+            totals[key] += value
+    totals["legacy_books_migrated"] = migration["migrated"]
+    totals["legacy_authors_migrated"] = author_migrations
+    totals["legacy_books_unresolved"] = len(migration["unresolved"])
+    return totals
+
+
+def main() -> None:
+    rows = load_rows(SOURCE_CSV)
+    print(f"Validated {len(rows)} rows from {SOURCE_CSV}")
+
+    load_dotenv()
+    uri = os.environ["NEO4J_URI"]
+    user = os.environ["NEO4J_USER"]
+    password = os.environ["NEO4J_PASSWORD"]
+    database = os.getenv("NEO4J_DB_NAME") or None
+    driver = GraphDatabase.driver(uri, auth=(user, password))
+    try:
+        with driver.session(database=database) as session:
+            totals = sync_rows(session, rows)
+        print("Ingestion complete:")
+        for key, value in totals.items():
+            print(f"  {key}: {value}")
     finally:
         driver.close()
 
