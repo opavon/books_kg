@@ -4,6 +4,7 @@
 MATCH (allReads:Read)
 WITH avg(allReads.score) AS overallAvg
 MATCH (a:Author)-[:WROTE]->(:Book)<-[:OF_BOOK]-(r:Read)
+WHERE coalesce(a.legacy_composite, false) = false
 WITH overallAvg, a, count(r) AS booksRead, avg(r.score) AS authorAvg
 WHERE booksRead > 3
 RETURN a.name AS author,
@@ -40,7 +41,7 @@ ORDER BY avgScore DESC;
 // 3. What did I read in the same period as book X?
 //    ("same period" = within 1 month either side; adjust as you like)
 // ---------------------------------------------------------------------
-MATCH (target:Book {title: $title})<-[:OF_BOOK]-(targetRead:Read)
+MATCH (target:Book {books_id: $books_id})<-[:OF_BOOK]-(targetRead:Read)
 MATCH (other:Book)<-[:OF_BOOK]-(r:Read)
 WHERE other <> target
   AND r.date >= targetRead.date - duration({months: 1})
@@ -55,6 +56,7 @@ ORDER BY r.date;
 //    Naive version: shared-genre overlap with your top-5 rated authors.
 // ---------------------------------------------------------------------
 MATCH (a:Author)-[:WROTE]->(:Book)<-[:OF_BOOK]-(r:Read)
+WHERE coalesce(a.legacy_composite, false) = false
 WITH a, avg(r.score) AS avgScore
 ORDER BY avgScore DESC
 LIMIT 5
@@ -63,10 +65,43 @@ UNWIND topAuthors AS topAuthor
 MATCH (topAuthor)-[:WROTE]->(:Book)-[:HAS_GENRE]->(g:Genre)
       <-[:HAS_GENRE]-(:Book)<-[:WROTE]-(other:Author)
 WHERE NOT other IN topAuthors
+  AND coalesce(other.legacy_composite, false) = false
 RETURN other.name AS candidateAuthor,
        collect(DISTINCT g.name) AS sharedGenres,
        count(DISTINCT g) AS overlapCount
 ORDER BY overlapCount DESC;
+
+
+// ---------------------------------------------------------------------
+// 5. Read distribution and scores by known author gender.
+//    A multi-author book can contribute to multiple gender groups.
+// ---------------------------------------------------------------------
+MATCH (allRead:Read)
+WITH count(DISTINCT allRead) AS totalReads
+MATCH (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
+WHERE coalesce(a.legacy_composite, false) = false
+MATCH (a)-[:HAS_GENDER]->(g:Gender)
+RETURN g.name AS gender,
+       count(DISTINCT r) AS classifiedReads,
+       totalReads,
+       round(avg(r.score), 2) AS avgScore
+ORDER BY classifiedReads DESC;
+
+
+// ---------------------------------------------------------------------
+// 6. Read distribution and scores by known author citizenship.
+//    Citizenship is not necessarily the same as nationality.
+// ---------------------------------------------------------------------
+MATCH (allRead:Read)
+WITH count(DISTINCT allRead) AS totalReads
+MATCH (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
+WHERE coalesce(a.legacy_composite, false) = false
+MATCH (a)-[:CITIZEN_OF]->(c:Country)
+RETURN c.name AS citizenship,
+       count(DISTINCT r) AS classifiedReads,
+       totalReads,
+       round(avg(r.score), 2) AS avgScore
+ORDER BY classifiedReads DESC;
 
 // A stronger version later: Neo4j Graph Data Science `gds.nodeSimilarity`
 // over an Author-Genre bipartite projection, which scores similarity
