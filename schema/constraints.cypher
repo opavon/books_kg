@@ -4,8 +4,14 @@
 CREATE CONSTRAINT author_name IF NOT EXISTS
 FOR (a:Author) REQUIRE a.name IS UNIQUE;
 
-CREATE CONSTRAINT book_title IF NOT EXISTS
-FOR (b:Book) REQUIRE b.title IS UNIQUE;
+// Book identity is the stable source ID; title is display data.
+DROP CONSTRAINT book_title IF EXISTS;
+CREATE CONSTRAINT book_books_id IF NOT EXISTS
+FOR (b:Book) REQUIRE b.books_id IS UNIQUE;
+
+// One source row and one Read event per book.
+CREATE CONSTRAINT read_books_id IF NOT EXISTS
+FOR (r:Read) REQUIRE r.books_id IS UNIQUE;
 
 // Phase 2 (enrichment) — safe to create now, they simply won't be used
 // until Genre/Country nodes exist.
