@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import os
+import random
 import re
 import time
 import unicodedata
@@ -135,16 +136,40 @@ def choose_exact_candidate(search_results: list[dict], entities: dict, label: st
 
 
 class JsonHttpClient:
-   def __init__(self, user_agent: str, request_interval: float = 1.0, opener=urlopen):
+   def __init__(
+      self,
+      user_agent: str,
+      request_interval_min: float = 5.0,
+      request_interval_max: float = 10.0,
+      jitter_min: float = 0.42,
+      jitter_max: float = 1.42,
+      opener=urlopen,
+      uniform=random.uniform,
+      monotonic=time.monotonic,
+      sleeper=time.sleep,
+   ):
+      if request_interval_min <= 0 or request_interval_max < request_interval_min:
+         raise ValueError("request interval bounds must be positive and ordered")
+      if jitter_min < 0 or jitter_max < jitter_min:
+         raise ValueError("jitter bounds must be nonnegative and ordered")
       self.user_agent = user_agent
-      self.request_interval = max(1.0, request_interval)
+      self.request_interval_min = request_interval_min
+      self.request_interval_max = request_interval_max
+      self.jitter_min = jitter_min
+      self.jitter_max = jitter_max
       self.opener = opener
-      self.last_request = 0.0
+      self.uniform = uniform
+      self.monotonic = monotonic
+      self.sleeper = sleeper
+      self.last_request = None
 
    def get_json(self, url: str) -> dict:
-      delay = self.request_interval - (time.monotonic() - self.last_request)
-      if delay > 0:
-         time.sleep(delay)
+      if self.last_request is not None:
+         interval = self.uniform(self.request_interval_min, self.request_interval_max)
+         jitter = self.uniform(self.jitter_min, self.jitter_max)
+         delay = interval + jitter - (self.monotonic() - self.last_request)
+         if delay > 0:
+            self.sleeper(delay)
       request = Request(url, headers={"User-Agent": self.user_agent, "Accept": "application/json"})
       try:
          with self.opener(request, timeout=30) as response:
@@ -152,7 +177,7 @@ class JsonHttpClient:
       except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as exc:
          raise RuntimeError(f"external lookup failed: {exc}") from exc
       finally:
-         self.last_request = time.monotonic()
+         self.last_request = self.monotonic()
       return payload
 
 
@@ -414,11 +439,18 @@ def main() -> None:
    parser.add_argument("--refresh", action="store_true", help="Recheck all entities, including accepted matches")
    parser.add_argument("--stale-days", type=int, default=180, help="Refresh accepted matches older than this")
    parser.add_argument("--limit", type=int, help="Limit each entity type, useful for a small test run")
-   parser.add_argument("--request-interval", type=float, default=1.0, help="Minimum seconds between external requests")
+   parser.add_argument("--request-interval-min", type=float, default=5.0, help="Minimum randomized base interval in seconds")
+   parser.add_argument("--request-interval-max", type=float, default=10.0, help="Maximum randomized base interval in seconds")
+   parser.add_argument("--jitter-min", type=float, default=0.42, help="Minimum positive request jitter in seconds")
+   parser.add_argument("--jitter-max", type=float, default=1.42, help="Maximum positive request jitter in seconds")
    parser.add_argument("--review-report", type=Path, help="Review CSV output path")
    args = parser.parse_args()
    if args.stale_days < 1 or args.limit is not None and args.limit < 1:
       parser.error("stale-days and limit must be positive")
+   if args.request_interval_min <= 0 or args.request_interval_max < args.request_interval_min:
+      parser.error("request interval bounds must be positive and ordered")
+   if args.jitter_min < 0 or args.jitter_max < args.jitter_min:
+      parser.error("jitter bounds must be nonnegative and ordered")
 
    load_dotenv()
    driver = GraphDatabase.driver(
@@ -427,7 +459,13 @@ def main() -> None:
    )
    database = os.getenv("NEO4J_DB_NAME") or None
    user_agent = os.getenv("WIKIDATA_USER_AGENT", "books-kg/0.1 (personal knowledge graph)")
-   http = JsonHttpClient(user_agent, args.request_interval)
+   http = JsonHttpClient(
+      user_agent,
+      args.request_interval_min,
+      args.request_interval_max,
+      args.jitter_min,
+      args.jitter_max,
+   )
    wikidata = WikidataClient(http)
    open_library = OpenLibraryClient(http)
    report_path = args.review_report or PROJECT_ROOT / "data" / "reports" / f"enrichment_review_{datetime.now():%Y%m%d_%H%M%S}.csv"

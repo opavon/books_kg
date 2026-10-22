@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from src.enrich.wikidata_enrich import (
+    JsonHttpClient,
     OpenLibraryClient,
     WikidataClient,
     claim_entity_ids,
@@ -83,6 +84,20 @@ class FakeOpenLibraryHttp:
 
     def get_json(self, url):
         return next(self.responses)
+
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def read(self):
+        return self.payload
 
 
 class RecordingTransaction:
@@ -167,6 +182,32 @@ class PipelineTests(unittest.TestCase):
     def test_csv_rejects_duplicate_headers(self):
         with self.assertRaisesRegex(ValueError, "duplicate column headers"):
             self.parse_csv("book_id,title,author,year_month,score,score\n")
+
+    def test_http_client_applies_random_interval_and_positive_jitter(self):
+        current_time = [0.0]
+        sleeps = []
+        random_values = iter([5.0, 0.42])
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            current_time[0] += seconds
+
+        client = JsonHttpClient(
+            "test-agent",
+            opener=lambda request, timeout: FakeResponse(b"{}"),
+            uniform=lambda lower, upper: next(random_values),
+            monotonic=lambda: current_time[0],
+            sleeper=fake_sleep,
+        )
+        client.get_json("https://example.invalid/first")
+        client.get_json("https://example.invalid/second")
+        self.assertEqual(sleeps, [5.42])
+
+    def test_http_client_rejects_invalid_interval_and_jitter_bounds(self):
+        with self.assertRaisesRegex(ValueError, "request interval bounds"):
+            JsonHttpClient("test-agent", request_interval_min=10, request_interval_max=5)
+        with self.assertRaisesRegex(ValueError, "jitter bounds"):
+            JsonHttpClient("test-agent", jitter_min=2, jitter_max=1)
 
     def test_reimport_is_idempotent_and_detects_updates(self):
         transaction = InMemoryTransaction()

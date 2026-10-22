@@ -129,7 +129,11 @@ uv run python src/enrich/wikidata_enrich.py --limit 5
 uv run python src/enrich/wikidata_enrich.py --refresh
 ```
 
-Requests are rate-limited to at least one second apart. You can optionally set a contactable client identifier in `.env`:
+Each HTTP request waits a randomized 5–10 second base interval plus 0.42–1.42
+seconds of positive jitter (an actual wait of 5.42–11.42 seconds). You can
+adjust these values with `--request-interval-min`, `--request-interval-max`,
+`--jitter-min`, and `--jitter-max`. You can optionally set a contactable client
+identifier in `.env`:
 
 ```dotenv
 WIKIDATA_USER_AGENT=books-kg/0.1 (your contact information)
