@@ -1,6 +1,8 @@
 import csv
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from src.enrich.wikidata_enrich import (
@@ -307,19 +309,23 @@ class PipelineTests(unittest.TestCase):
                 raise RuntimeError("temporary service failure")
 
         session = EnrichmentSession()
-        counts, reviews = run_enrichment(
-            session,
-            MatchedBookWikidataClient([], {"Q_BOOK": book_entity}),
-            FailingOpenLibrary(),
-            refresh=False,
-            stale_days=180,
-            limit=None,
-        )
+        progress = io.StringIO()
+        with redirect_stdout(progress):
+            counts, reviews = run_enrichment(
+                session,
+                MatchedBookWikidataClient([], {"Q_BOOK": book_entity}),
+                FailingOpenLibrary(),
+                refresh=False,
+                stale_days=180,
+                limit=None,
+            )
         update = session.transaction.calls[0][1]
         self.assertEqual(counts["errors"], 0)
         self.assertEqual(counts["matched"], 1)
         self.assertEqual(update["status"], "matched")
         self.assertEqual(reviews[0]["status"], "error")
+        self.assertIn("Enrichment queue: 0 authors, 1 books.", progress.getvalue())
+        self.assertIn("[book 1/1] 0001 A Novel: matched", progress.getvalue())
 
 
 if __name__ == "__main__":

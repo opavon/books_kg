@@ -346,14 +346,20 @@ def write_review_report(path: Path, reviews: list[dict]) -> None:
 
 
 def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryClient, refresh: bool, stale_days: int, limit: int | None) -> tuple[dict, list[dict]]:
+   print("Finding authors and books that need enrichment...", flush=True)
    authors = list(session.run(DUE_AUTHORS_QUERY, refresh=refresh, stale_days=stale_days))
+   books = list(session.run(DUE_BOOKS_QUERY, refresh=refresh, stale_days=stale_days))
    if limit is not None:
       authors = authors[:limit]
+      books = books[:limit]
 
+   print(f"Enrichment queue: {len(authors)} authors, {len(books)} books.", flush=True)
    counts = {"authors_checked": 0, "books_checked": 0, "matched": 0, "unresolved": 0, "errors": 0}
    reviews = []
-   for author in authors:
+   for index, author in enumerate(authors, start=1):
       name = author["name"]
+      progress_status = "error"
+      progress_detail = ""
       try:
          status, wikidata_id, entity, candidates = wikidata.resolve(name, "author", author["wikidata_id"])
          genders = labels_for_ids(wikidata, entity, "P21") if entity else []
@@ -361,6 +367,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          session.execute_write(write_author, name, status, wikidata_id, genders, countries)
          counts["authors_checked"] += 1
          counts["matched" if status == "matched" else "unresolved"] += 1
+         progress_status = status
          if status != "matched":
             append_review(reviews, "author", name, name, status, candidates)
       except Exception as exc:
@@ -368,16 +375,17 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          counts["authors_checked"] += 1
          counts["errors"] += 1
          append_review(reviews, "author", name, name, "error", [], str(exc))
+         progress_detail = f": {exc}"
+      print(f"[author {index}/{len(authors)}] {name}: {progress_status}{progress_detail}", flush=True)
 
-   books = list(session.run(DUE_BOOKS_QUERY, refresh=refresh, stale_days=stale_days))
-   if limit is not None:
-      books = books[:limit]
-   for book in books:
+   for index, book in enumerate(books, start=1):
       title = book["title"]
       key = book["book_id"]
       book_authors = [author for author in (book["authors"] or []) if author.get("name")]
       authors_for_book = [author["name"] for author in book_authors]
       author_ids = [author["wikidata_id"] for author in book_authors if author.get("wikidata_id")]
+      progress_status = "error"
+      progress_detail = ""
       try:
          status, wikidata_id, entity, candidates = wikidata.resolve(
             title, "book", book["wikidata_id"], related_author_ids=author_ids
@@ -398,6 +406,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
                   append_review(reviews, "book_summary", key, title, ol_status, ol_candidates)
             except Exception as exc:
                append_review(reviews, "book_summary", key, title, "error", [], str(exc))
+               progress_detail = f"; Open Library summary lookup failed: {exc}"
 
          record = {
             "book_id": key,
@@ -412,6 +421,7 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          session.execute_write(write_book, record)
          counts["books_checked"] += 1
          counts["matched" if status == "matched" else "unresolved"] += 1
+         progress_status = status
          if status != "matched":
             append_review(reviews, "book", key, title, status, candidates)
       except Exception as exc:
@@ -431,6 +441,8 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          counts["books_checked"] += 1
          counts["errors"] += 1
          append_review(reviews, "book", key, title, "error", [], str(exc))
+         progress_detail = f": {exc}"
+      print(f"[book {index}/{len(books)}] {key} {title}: {progress_status}{progress_detail}", flush=True)
    return counts, reviews
 
 

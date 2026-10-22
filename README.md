@@ -85,7 +85,8 @@ matches are refreshed after 180 days. Use `--refresh` to recheck all records or
 `--limit 5` for a small trial. Each HTTP request waits a randomized 5–10 second
 base interval plus 0.42–1.42 seconds of positive jitter. Adjust the bounds with
 `--request-interval-min`, `--request-interval-max`, `--jitter-min`, and
-`--jitter-max`. `WIKIDATA_USER_AGENT` can be set in `.env`.
+`--jitter-max`. The script prints queue sizes and progress after each entity.
+`WIKIDATA_USER_AGENT` can be set in `.env`.
 
 Lookup errors do not erase stored facts. Gender and genre remain nodes. Wikidata
 P27 is modeled as `CITIZEN_OF`, not assumed to mean nationality. Open Library is
