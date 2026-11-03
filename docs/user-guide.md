@@ -65,14 +65,18 @@ data/raw/books_raw_20261001.csv
 Its header row must be:
 
 ```text
-book_id,title,author,year_month,score
+book_id,title,title_read,language_read,author,year_month,score
 ```
 
 Append one row per new book. The current data contains examples like:
 
 ```csv
-0284,EXAMPLE BOOK,Jane Writer/John Writer,2026_10,8.5
+0284,EXAMPLE BOOK,EXAMPLE BOOK,en,Jane Writer/John Writer,2026_10,8.5
 ```
+
+`title_read` and `language_read` are retained in the source CSV but are not
+currently imported into Neo4j. The loader uses `book_id`, `title`, `author`,
+`year_month`, and `score`.
 
 Follow these rules:
 
@@ -129,8 +133,8 @@ uv run python src/enrich/wikidata_enrich.py --limit 5
 uv run python src/enrich/wikidata_enrich.py --refresh
 ```
 
-Each HTTP request waits a randomized 5–10 second base interval plus 0.42–1.42
-seconds of positive jitter (an actual wait of 5.42–11.42 seconds). You can
+Each HTTP request waits a randomized 3-7 second base interval plus 0.42–1.42
+seconds of positive jitter (an actual wait of 3.42–8.42 seconds). You can
 adjust these values with `--request-interval-min`, `--request-interval-max`,
 `--jitter-min`, and `--jitter-max`. You can optionally set a contactable client
 identifier in `.env`:

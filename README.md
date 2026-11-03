@@ -50,13 +50,16 @@ Maintain one append-only file at `data/raw/books_raw_20261001.csv` with these
 headers:
 
 ```text
-book_id,title,author,year_month,score
+book_id,title,title_read,language_read,author,year_month,score
 ```
 
 Keep `book_id` stable and unique, including leading zeros. Each book appears
 once. Use `YYYY_MM` for `year_month`; the day is set to `01`. Scores must be
 finite numbers and may be decimal. Separate authors with `/`; the loader trims
-each name and creates a separate author relationship.
+each name and creates a separate author relationship. `title_read` and
+`language_read` are retained in the source CSV but are not currently imported
+into Neo4j; ingestion uses `book_id`, `title`, `author`, `year_month`, and
+`score`.
 
 The loader validates the entire CSV before connecting to Neo4j. From the
 project root, run:

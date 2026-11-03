@@ -110,12 +110,15 @@ different local records can resolve to the same Wikidata work/person.
 
 ## Ingestion and enrichment behavior
 
-The single CSV in `data/raw/` is cumulative and append-only. It has the
-columns `book_id,title,author,year_month,score`. Ingestion validates the
-whole file before connecting to Neo4j, preserves IDs as strings, accepts
-finite decimal scores, and splits author names on `/`. Re-running the same
-file is idempotent: Books and Reads are merged by `book_id`, and Authors
-and relationships are merged by normalized name.
+The single CSV in `data/raw/` is cumulative and append-only. Its current
+columns are `book_id,title,title_read,language_read,author,year_month,score`.
+Ingestion uses `book_id`, `title`, `author`, `year_month`, and `score`;
+`title_read` and `language_read` remain source metadata and are not stored in
+the graph. Ingestion validates the whole file before connecting to Neo4j,
+preserves IDs as strings, accepts finite decimal scores, and splits author
+names on `/`. Re-running the same file is idempotent: Books and Reads are
+merged by `book_id`, and Authors and relationships are merged by normalized
+name.
 
 Start with a fresh database and apply the constraints before the first load.
 Every source row must have a stable `book_id`; ingestion does not migrate

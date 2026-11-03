@@ -139,8 +139,8 @@ class JsonHttpClient:
    def __init__(
       self,
       user_agent: str,
-      request_interval_min: float = 5.0,
-      request_interval_max: float = 10.0,
+      request_interval_min: float = 3.0,
+      request_interval_max: float = 7.0,
       jitter_min: float = 0.42,
       jitter_max: float = 1.42,
       opener=urlopen,
