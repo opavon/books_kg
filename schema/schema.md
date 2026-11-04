@@ -13,7 +13,7 @@ graph LR
 |----------|--------|-------|
 | `name`   | string | Unique. Normalize spelling/format before load (see ingest notes). |
 | `wikidata_id` | string | Optional accepted Wikidata entity reference. |
-| `wikidata_status` | string | `matched`, `not_found`, `ambiguous`, or `error`. |
+| `wikidata_status` | string | `matched`, `needs_review`, `no_candidate`, or `error`. `no_candidate` means the attempted search found no verified human candidate; it does not prove absence from Wikidata. |
 | `wikidata_checked_at` | datetime | Last lookup attempt. |
 
 ### `Book`
@@ -26,7 +26,7 @@ graph LR
 | `publication_year` | integer | From Wikidata, or Open Library when Wikidata has no year. |
 | `summary` | string | Open Library work description only; Wikidata descriptions are not treated as summaries. |
 | `summary_source` | string | Provenance for the stored summary. |
-| `wikidata_status` | string | `matched`, `not_found`, `ambiguous`, or `error`. |
+| `wikidata_status` | string | `matched`, `needs_review`, `no_candidate`, or `error`. `no_candidate` means the attempted search found no book passing its type and known-author checks; it does not prove absence from Wikidata. |
 | `wikidata_checked_at` | datetime | Last lookup attempt. |
 
 ### `Read`
@@ -125,13 +125,16 @@ Every source row must have a stable `book_id`; ingestion does not migrate
 Books or Reads from an older title-keyed schema. The source CSV splits authors
 with `/`, and ingestion creates one Author node and `WROTE` relationship per name.
 
-Wikidata is the primary enrichment source. Only one exact-label candidate
-of the expected entity type is auto-accepted; ambiguous and missing matches
-are written to a review CSV under `data/reports/`. Accepted Wikidata IDs
-are reused on refresh. New and unresolved entities are checked each run;
-accepted matches are refreshed after 180 days or with `--refresh`. Lookup
-errors do not erase previously stored facts. Author P27 is modeled as
-`CITIZEN_OF`, not nationality. Open Library is queried only when a book has
-no stored summary; a summary is saved only for one exact title-and-author
-work match, with `summary_source` recorded. Wikidata descriptions are not
-misrepresented as book summaries.
+Wikidata is the primary enrichment source. Authors and books are auto-accepted
+only for one exact normalized English-label candidate that passes the
+entity-type check; known book authors also filter conflicting creator claims.
+Other suitable candidates are `needs_review`; `no_candidate` means the
+attempted search found no suitable candidate and does not prove absence from
+Wikidata. Use `--interactive` to accept a numbered author or book candidate;
+accepted IDs are stored and reused on future runs. New and unresolved entities
+are checked each run; accepted matches are refreshed after 180 days or with
+`--refresh`. Lookup errors do not erase previously stored facts. Author P27 is
+modeled as `CITIZEN_OF`, not nationality. Open Library summary lookup remains
+separate: it is queried only when a book has no stored summary, and a summary
+is saved only for one exact title-and-author work match, with `summary_source`
+recorded. Wikidata descriptions are not misrepresented as book summaries.

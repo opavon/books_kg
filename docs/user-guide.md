@@ -119,7 +119,9 @@ Run enrichment after ingestion:
 uv run python src/enrich/wikidata_enrich.py
 ```
 
-The script checks new and unresolved authors/books and refreshes successful matches older than 180 days. Wikidata is the primary source. It automatically accepts only one exact-label candidate with the expected entity type; for books, known author Wikidata IDs also help reject candidates with conflicting creators.
+The script checks new and unresolved authors/books and refreshes successful matches older than 180 days. Wikidata is the primary source. An author is automatically matched only when exactly one candidate has the same normalized English label and is verified as a human. A book is automatically matched only when exactly one candidate has the same normalized English label and passes the existing book type check. When known authors have Wikidata IDs, a book candidate is excluded if its `P50` claims conflict with all of them; candidates without `P50` claims or with at least one matching author remain eligible.
+
+For either type, suitable candidates without a unique exact match produce `needs_review`. `no_candidate` means the attempted search found no suitable candidate (a verified human for an author, or a book passing its type and known-author checks). It does not prove that the person or work is absent from Wikidata: results are ranked and limited. Non-human results are excluded from author candidates, and non-book or known-author-conflicting results are excluded from book candidates.
 
 You can run a small trial first:
 
@@ -133,8 +135,8 @@ uv run python src/enrich/wikidata_enrich.py --limit 5
 uv run python src/enrich/wikidata_enrich.py --refresh
 ```
 
-Each HTTP request waits a randomized 3-7 second base interval plus 0.42–1.42
-seconds of positive jitter (an actual wait of 3.42–8.42 seconds). You can
+Each HTTP request waits a randomized 5-10 second base interval plus 0.42–1.42
+seconds of positive jitter (an actual wait of 5.42–11.42 seconds). You can
 adjust these values with `--request-interval-min`, `--request-interval-max`,
 `--jitter-min`, and `--jitter-max`. You can optionally set a contactable client
 identifier in `.env`:
@@ -143,9 +145,17 @@ identifier in `.env`:
 WIKIDATA_USER_AGENT=books-kg/0.1 (your contact information)
 ```
 
-Ambiguous, missing, and failed matches are reported in a timestamped CSV under `data/reports/`. Open that report in a spreadsheet to inspect candidate labels and descriptions. The script does not guess between ambiguous candidates. Successful Wikidata entity IDs are stored for future runs, so accepted matches do not need to be searched by name again. Lookup errors do not erase previously stored facts.
+Author and book `needs_review`/`no_candidate` results and failed lookups are reported in a timestamped CSV under `data/reports/`. Open that report in a spreadsheet to inspect candidate IDs, labels, descriptions, and available aliases or book author IDs. Successful Wikidata entity IDs are stored for future runs, so accepted matches do not need to be searched by name again. Lookup errors do not erase previously stored facts.
 
-Wikidata P27 is country of citizenship, which is not necessarily nationality; the graph relationship is named `CITIZEN_OF`. Gender and genre are represented as nodes. Wikidata descriptions are not treated as book summaries. If no summary is stored, Open Library is tried as a secondary source, and a description is stored only after a unique exact title-and-author match. The source is recorded on the Book.
+For author or book candidates that need review, run:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --interactive
+```
+
+The prompt lists candidate IDs, labels, descriptions, and available English aliases; book candidates also show their Wikidata author IDs when present. Enter a candidate number to accept it, or press Enter to skip. The selection must belong to the current candidate list and be revalidated before it is saved: authors must be humans, and books must pass the book type and known-author checks. Accepted IDs are reused on later runs; skipped candidates remain in the review CSV. Without `--interactive`, the script never prompts and still writes the report. `no_candidate` means only that the attempted search found no suitable candidates; it does not prove that an entry is absent from Wikidata.
+
+Wikidata P27 is country of citizenship, which is not necessarily nationality; the graph relationship is named `CITIZEN_OF`. Gender and genre are represented as nodes. Wikidata book statuses are separate from Open Library summary lookup. If no summary is stored, Open Library is tried as a secondary source, and a description is stored only after a unique exact title-and-author match. The source is recorded on the Book.
 
 ## 7. Explore the Graph
 

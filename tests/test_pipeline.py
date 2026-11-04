@@ -10,7 +10,11 @@ from src.enrich.wikidata_enrich import (
     OpenLibraryClient,
     WikidataClient,
     claim_entity_ids,
+    confirm_author_candidate,
+    confirm_book_candidate,
     normalize_text,
+    prompt_author_candidate,
+    prompt_book_candidate,
     run_enrichment,
     year_from_claims,
 )
@@ -72,8 +76,10 @@ class FakeWikidataClient(WikidataClient):
         super().__init__(None)
         self.results = results
         self.entity_data = entities
+        self.search_calls = []
 
     def search(self, label):
+        self.search_calls.append(label)
         return self.results
 
     def entities(self, entity_ids):
@@ -109,6 +115,46 @@ class RecordingTransaction:
     def run(self, query, **parameters):
         self.calls.append((query, parameters))
         return FakeResult()
+
+
+class AuthorEnrichmentSession:
+    def __init__(self, author):
+        self.author = author
+        self.transaction = RecordingTransaction()
+
+    def run(self, query, **parameters):
+        if "MATCH (b:Book)" in query:
+            return FakeResult()
+        if "MATCH (a:Author)" in query:
+            return FakeResult([self.author])
+        raise AssertionError(f"Unexpected query: {query}")
+
+    def execute_write(self, callback, *arguments):
+        result = callback(self.transaction, *arguments)
+        query, parameters = self.transaction.calls[-1]
+        if "MATCH (a:Author {name: $name})" in query and parameters["wikidata_id"]:
+            self.author["wikidata_id"] = parameters["wikidata_id"]
+        return result
+
+
+class BookEnrichmentSession:
+    def __init__(self, book):
+        self.book = book
+        self.transaction = RecordingTransaction()
+
+    def run(self, query, **parameters):
+        if "MATCH (b:Book)" in query:
+            return FakeResult([self.book])
+        if "MATCH (a:Author)" in query:
+            return FakeResult()
+        raise AssertionError(f"Unexpected query: {query}")
+
+    def execute_write(self, callback, *arguments):
+        result = callback(self.transaction, *arguments)
+        record = arguments[0]
+        if isinstance(record, dict) and record.get("wikidata_id"):
+            self.book["wikidata_id"] = record["wikidata_id"]
+        return result
 
 
 class EnrichmentSession:
@@ -244,7 +290,120 @@ class PipelineTests(unittest.TestCase):
         }
         client = FakeWikidataClient([{"id": "Q1"}, {"id": "Q2"}], {"Q1": person, "Q2": person})
         status, entity_id, _, _ = client.resolve("Alex Smith", "author")
-        self.assertEqual((status, entity_id), ("ambiguous", None))
+        self.assertEqual((status, entity_id), ("needs_review", None))
+
+    def test_wikidata_routes_single_nonexact_human_to_review(self):
+        person = {
+            "labels": {"en": {"value": "Christopher Paolini"}},
+            "descriptions": {"en": {"value": "author, novelist"}},
+            "aliases": {"en": [{"value": "Christopher James Paolini"}]},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]},
+        }
+        non_person = {"labels": {"en": {"value": "Christopher Paolini"}}, "claims": {}}
+        client = FakeWikidataClient([{"id": "Q1"}, {"id": "Q2"}], {"Q1": person, "Q2": non_person})
+
+        status, entity_id, _, candidates = client.resolve("Christopher James Paolini", "author")
+
+        self.assertEqual((status, entity_id), ("needs_review", None))
+        self.assertEqual([candidate["id"] for candidate in candidates], ["Q1"])
+        self.assertEqual(candidates[0]["aliases"], ["Christopher James Paolini"])
+
+    def test_wikidata_reports_no_candidate_when_no_human_is_returned(self):
+        non_person = {"labels": {"en": {"value": "Ada Lovelace"}}, "claims": {}}
+        client = FakeWikidataClient([{"id": "Q1"}], {"Q1": non_person})
+
+        status, entity_id, _, candidates = client.resolve("Ada Lovelace", "author")
+
+        self.assertEqual((status, entity_id, candidates), ("no_candidate", None, []))
+
+    def test_wikidata_ignores_nonhuman_results_when_exact_human_exists(self):
+        person = {
+            "labels": {"en": {"value": "Ada Lovelace"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q1"}, {"id": "Q2"}], {"Q1": person, "Q2": {"claims": {}}})
+
+        status, entity_id, _, candidates = client.resolve("Ada Lovelace", "author")
+
+        self.assertEqual((status, entity_id), ("matched", "Q1"))
+        self.assertEqual([candidate["id"] for candidate in candidates], ["Q1"])
+
+    def test_interactive_author_selection_is_validated_and_persisted(self):
+        person = {
+            "labels": {"en": {"value": "Christopher Paolini"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q1"}], {"Q1": person})
+        author = {"name": "Christopher James Paolini", "wikidata_id": None}
+        session = AuthorEnrichmentSession(author)
+
+        counts, reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: "1",
+        )
+
+        author_update = session.transaction.calls[0][1]
+        self.assertEqual(counts["matched"], 1)
+        self.assertEqual(reviews, [])
+        self.assertEqual(author_update["wikidata_id"], "Q1")
+        self.assertEqual(author_update["status"], "matched")
+
+        accepted = confirm_author_candidate("Q1", [{"id": "Q1"}], client)
+        skipped = confirm_author_candidate(None, [{"id": "Q1"}], client)
+        invalid = confirm_author_candidate("Q_OUTSIDE_LIST", [{"id": "Q1"}], client)
+        self.assertEqual(accepted, ("Q1", person))
+        self.assertIsNone(skipped)
+        self.assertIsNone(invalid)
+        self.assertEqual(author["wikidata_id"], "Q1")
+
+        next_counts, next_reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: self.fail("a stored author ID should not prompt"),
+        )
+        self.assertEqual(next_counts["matched"], 1)
+        self.assertEqual(next_reviews, [])
+        self.assertEqual(client.search_calls, ["Christopher James Paolini"])
+
+    def test_interactive_author_skip_keeps_candidate_unresolved(self):
+        person = {
+            "labels": {"en": {"value": "Christopher Paolini"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q1"}], {"Q1": person})
+        session = AuthorEnrichmentSession({"name": "Christopher James Paolini", "wikidata_id": None})
+
+        counts, reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: "",
+        )
+
+        author_update = session.transaction.calls[0][1]
+        self.assertEqual(counts["unresolved"], 1)
+        self.assertEqual(author_update["wikidata_id"], None)
+        self.assertEqual(author_update["status"], "needs_review")
+        self.assertEqual(reviews[0]["status"], "needs_review")
+
+    def test_author_prompt_rejects_out_of_range_choice(self):
+        selected = prompt_author_candidate("Author", [{"id": "Q1", "label": "Candidate"}], lambda _: "2")
+        self.assertIsNone(selected)
 
     def test_wikidata_book_candidate_must_not_conflict_with_known_author(self):
         book = {
@@ -258,7 +417,197 @@ class PipelineTests(unittest.TestCase):
         status, entity_id, _, _ = client.resolve(
             "A Novel", "book", related_author_ids=["Q_EXPECTED_AUTHOR"]
         )
-        self.assertEqual((status, entity_id), ("not_found", None))
+        self.assertEqual((status, entity_id), ("no_candidate", None))
+
+    def test_wikidata_accepts_one_exact_book_with_matching_author(self):
+        book = {
+            "labels": {"en": {"value": "A Novel"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q_AUTHOR"}}}}],
+            },
+        }
+        client = FakeWikidataClient([{"id": "Q_BOOK"}], {"Q_BOOK": book})
+
+        status, entity_id, entity, _ = client.resolve(
+            "A Novel", "book", related_author_ids=["Q_AUTHOR"]
+        )
+
+        self.assertEqual((status, entity_id), ("matched", "Q_BOOK"))
+        self.assertIs(entity, book)
+
+    def test_wikidata_routes_single_nonexact_suitable_book_to_review(self):
+        book = {
+            "labels": {"en": {"value": "English Title"}},
+            "descriptions": {"en": {"value": "novel by an author"}},
+            "aliases": {"en": [{"value": "Local Title"}]},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q_AUTHOR"}}}}],
+            },
+        }
+        client = FakeWikidataClient([{"id": "Q_BOOK"}], {"Q_BOOK": book})
+
+        status, entity_id, _, candidates = client.resolve(
+            "Local Title", "book", related_author_ids=["Q_AUTHOR"]
+        )
+
+        self.assertEqual((status, entity_id), ("needs_review", None))
+        self.assertEqual(candidates[0]["id"], "Q_BOOK")
+        self.assertEqual(candidates[0]["author_ids"], ["Q_AUTHOR"])
+        self.assertEqual(candidates[0]["aliases"], ["Local Title"])
+
+    def test_wikidata_routes_multiple_exact_books_to_review(self):
+        book = {
+            "labels": {"en": {"value": "A Novel"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q1"}, {"id": "Q2"}], {"Q1": book, "Q2": book})
+
+        status, entity_id, _, candidates = client.resolve("A Novel", "book")
+
+        self.assertEqual((status, entity_id), ("needs_review", None))
+        self.assertEqual([candidate["id"] for candidate in candidates], ["Q1", "Q2"])
+
+    def test_wikidata_excludes_nonbooks_from_book_candidates(self):
+        nonbook = {
+            "labels": {"en": {"value": "A Novel"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q5"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q1"}], {"Q1": nonbook})
+
+        status, entity_id, _, candidates = client.resolve("A Novel", "book")
+
+        self.assertEqual((status, entity_id, candidates), ("no_candidate", None, []))
+
+    def test_wikidata_excludes_books_with_only_conflicting_authors(self):
+        book = {
+            "labels": {"en": {"value": "A Novel"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q_WRONG"}}}}],
+            },
+        }
+        client = FakeWikidataClient([{"id": "Q1"}], {"Q1": book})
+
+        status, entity_id, _, candidates = client.resolve(
+            "A Novel", "book", related_author_ids=["Q_EXPECTED"]
+        )
+
+        self.assertEqual((status, entity_id, candidates), ("no_candidate", None, []))
+
+    def test_manual_book_selection_is_persisted_and_reused(self):
+        book_entity = {
+            "labels": {"en": {"value": "English Title"}},
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q_AUTHOR"}}}}],
+            },
+        }
+        client = FakeWikidataClient([{"id": "Q_BOOK"}], {"Q_BOOK": book_entity})
+        book = {
+            "book_id": "0001",
+            "title": "Local Title",
+            "wikidata_id": None,
+            "summary": "Already present",
+            "authors": [{"name": "Author", "wikidata_id": "Q_AUTHOR"}],
+        }
+        session = BookEnrichmentSession(book)
+
+        counts, reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: "1",
+        )
+
+        record = next(
+            parameters
+            for query, parameters in session.transaction.calls
+            if "MATCH (b:Book {book_id: $book_id})" in query
+         )
+        self.assertEqual(counts["matched"], 1)
+        self.assertEqual(reviews, [])
+        self.assertEqual(record["wikidata_id"], "Q_BOOK")
+        self.assertEqual(record["status"], "matched")
+        self.assertEqual(book["wikidata_id"], "Q_BOOK")
+        self.assertEqual(
+            confirm_book_candidate("Q_BOOK", [{"id": "Q_BOOK"}], client, ["Q_AUTHOR"]),
+            ("Q_BOOK", book_entity),
+        )
+        self.assertIsNone(confirm_book_candidate("Q_OUTSIDE", [{"id": "Q_BOOK"}], client, ["Q_AUTHOR"]))
+
+        next_counts, next_reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: self.fail("a stored book ID should not prompt"),
+        )
+        self.assertEqual(next_counts["matched"], 1)
+        self.assertEqual(next_reviews, [])
+        self.assertEqual(client.search_calls, ["Local Title"])
+
+    def test_manual_book_selection_rejects_conflicting_author_claims(self):
+        conflicting_book = {
+            "claims": {
+                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}],
+                "P50": [{"mainsnak": {"datavalue": {"value": {"id": "Q_WRONG"}}}}],
+            },
+        }
+        client = FakeWikidataClient([], {"Q_BOOK": conflicting_book})
+
+        accepted = confirm_book_candidate("Q_BOOK", [{"id": "Q_BOOK"}], client, ["Q_EXPECTED"])
+
+        self.assertIsNone(accepted)
+
+    def test_interactive_book_skip_keeps_candidate_unresolved(self):
+        book_entity = {
+            "labels": {"en": {"value": "English Title"}},
+            "claims": {"P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q571"}}}}]},
+        }
+        client = FakeWikidataClient([{"id": "Q_BOOK"}], {"Q_BOOK": book_entity})
+        session = BookEnrichmentSession(
+            {
+                "book_id": "0001",
+                "title": "Local Title",
+                "wikidata_id": None,
+                "summary": "Already present",
+                "authors": [],
+            }
+        )
+
+        counts, reviews = run_enrichment(
+            session,
+            client,
+            None,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            interactive=True,
+            input_fn=lambda _: "",
+        )
+
+        record = next(
+            parameters
+            for query, parameters in session.transaction.calls
+            if "MATCH (b:Book {book_id: $book_id})" in query
+         )
+        self.assertEqual(counts["unresolved"], 1)
+        self.assertIsNone(record["wikidata_id"])
+        self.assertEqual(record["status"], "needs_review")
+        self.assertEqual(reviews[-1]["status"], "needs_review")
+
+    def test_book_prompt_rejects_out_of_range_choice(self):
+        selected = prompt_book_candidate("A Novel", [{"id": "Q1", "label": "Candidate"}], lambda _: "2")
+        self.assertIsNone(selected)
 
     def test_wikidata_genre_claim_alone_does_not_identify_a_book(self):
         item = {
@@ -267,7 +616,7 @@ class PipelineTests(unittest.TestCase):
         }
         client = FakeWikidataClient([{"id": "Q_ITEM"}], {"Q_ITEM": item})
         status, entity_id, _, _ = client.resolve("A Novel", "book")
-        self.assertEqual((status, entity_id), ("not_found", None))
+        self.assertEqual((status, entity_id), ("no_candidate", None))
 
     def test_wikidata_helpers_extract_claims_and_year(self):
         entity = {

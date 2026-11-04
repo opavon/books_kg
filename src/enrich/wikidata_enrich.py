@@ -119,6 +119,11 @@ def is_entity_type(entity: dict, entity_type: str) -> bool:
    )
 
 
+def book_matches_known_authors(entity: dict, related_author_ids: list[str] | None) -> bool:
+   author_ids = claim_entity_ids(entity, "P50")
+   return not related_author_ids or not author_ids or bool(set(related_author_ids) & set(author_ids))
+
+
 def choose_exact_candidate(search_results: list[dict], entities: dict, label: str, entity_type: str) -> tuple[str, dict] | None:
    target = normalize_text(label)
    candidates = []
@@ -139,8 +144,8 @@ class JsonHttpClient:
    def __init__(
       self,
       user_agent: str,
-      request_interval_min: float = 3.0,
-      request_interval_max: float = 7.0,
+      request_interval_min: float = 5.0,
+      request_interval_max: float = 10.0,
       jitter_min: float = 0.42,
       jitter_max: float = 1.42,
       opener=urlopen,
@@ -187,7 +192,7 @@ class WikidataClient:
 
    def search(self, label: str) -> list[dict]:
       params = urlencode(
-         {"action": "wbsearchentities", "search": label, "language": "en", "format": "json", "type": "item", "limit": 10}
+         {"action": "wbsearchentities", "search": label, "language": "en", "format": "json", "type": "item", "limit": 50}
       )
       return self.http.get_json(f"{WIKIDATA_API}?{params}").get("search", [])
 
@@ -198,7 +203,7 @@ class WikidataClient:
          {
             "action": "wbgetentities",
             "ids": "|".join(entity_ids[:50]),
-            "props": "labels|descriptions|claims",
+            "props": "labels|descriptions|aliases|claims",
             "languages": "en",
             "format": "json",
          }
@@ -221,32 +226,63 @@ class WikidataClient:
       search_results = self.search(label)
       result_ids = [result["id"] for result in search_results]
       entities = self.entities(result_ids)
-      exact = [
-         (result["id"], entities[result["id"]])
+      if entity_type == "author":
+         human_results = [
+            (result, entities[result["id"]])
+            for result in search_results
+            if result["id"] in entities and is_entity_type(entities[result["id"]], "author")
+         ]
+         exact = [
+            (result["id"], entity)
+            for result, entity in human_results
+            if normalize_text(entity_label(entity)) == normalize_text(label)
+         ]
+         review_candidates = [
+            {
+               "id": result["id"],
+               "label": entity_label(entity),
+               "description": entity.get("descriptions", {}).get("en", {}).get("value", ""),
+               "aliases": [
+                  alias["value"]
+                  for alias in entity.get("aliases", {}).get("en", [])
+                  if alias.get("value")
+               ],
+            }
+            for result, entity in human_results
+         ]
+         if len(exact) == 1:
+            return "matched", exact[0][0], exact[0][1], review_candidates
+         if human_results:
+            return "needs_review", None, None, review_candidates
+         return "no_candidate", None, None, []
+
+      suitable_books = [
+         (result, entities[result["id"]])
          for result in search_results
          if result["id"] in entities
-         and normalize_text(entity_label(entities[result["id"]])) == normalize_text(label)
-         and is_entity_type(entities[result["id"]], entity_type)
-         and (
-            entity_type != "book"
-            or not related_author_ids
-            or not claim_entity_ids(entities[result["id"]], "P50")
-            or bool(set(related_author_ids) & set(claim_entity_ids(entities[result["id"]], "P50")))
-         )
+         and is_entity_type(entities[result["id"]], "book")
+         and book_matches_known_authors(entities[result["id"]], related_author_ids)
+      ]
+      exact = [
+         (result["id"], entity)
+         for result, entity in suitable_books
+         if normalize_text(entity_label(entity)) == normalize_text(label)
       ]
       review_candidates = [
          {
             "id": result["id"],
-            "label": entity_label(entities[result["id"]]) if result["id"] in entities else result.get("label", ""),
-            "description": entities.get(result["id"], {}).get("descriptions", {}).get("en", {}).get("value", ""),
+            "label": entity_label(entity) or result.get("label", ""),
+            "description": entity.get("descriptions", {}).get("en", {}).get("value", ""),
+            "aliases": [alias["value"] for alias in entity.get("aliases", {}).get("en", []) if alias.get("value")],
+            "author_ids": claim_entity_ids(entity, "P50"),
          }
-         for result in search_results
+         for result, entity in suitable_books
       ]
       if len(exact) == 1:
          return "matched", exact[0][0], exact[0][1], review_candidates
-      if len(exact) > 1:
-         return "ambiguous", None, None, review_candidates
-      return "not_found", None, None, review_candidates
+      if suitable_books:
+         return "needs_review", None, None, review_candidates
+      return "no_candidate", None, None, []
 
 
 class OpenLibraryClient:
@@ -345,7 +381,90 @@ def write_review_report(path: Path, reviews: list[dict]) -> None:
       writer.writerows(reviews)
 
 
-def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryClient, refresh: bool, stale_days: int, limit: int | None) -> tuple[dict, list[dict]]:
+def prompt_author_candidate(name: str, candidates: list[dict], input_fn=None) -> str | None:
+   print(f"\nChoose a Wikidata candidate for {name}, or press Enter to skip:")
+   for index, candidate in enumerate(candidates, start=1):
+      description = candidate.get("description", "")
+      aliases = ", ".join(candidate.get("aliases", []))
+      details = "; ".join(value for value in (description, f"Aliases: {aliases}" if aliases else "") if value)
+      print(f"  {index}. {candidate['id']}  {candidate.get('label', '')}  {details}")
+   choice = (input_fn or input)("Selection: ").strip()
+   if not choice:
+      return None
+   try:
+      index = int(choice)
+   except ValueError:
+      print("Invalid selection; leaving the author for review.")
+      return None
+   if index < 1 or index > len(candidates):
+      print("Invalid selection; leaving the author for review.")
+      return None
+   return candidates[index - 1]["id"]
+
+
+def confirm_author_candidate(candidate_id: str | None, candidates: list[dict], wikidata: WikidataClient) -> tuple[str, dict] | None:
+   candidate_ids = {candidate.get("id") for candidate in candidates}
+   if not candidate_id or candidate_id not in candidate_ids:
+      return None
+   entity = wikidata.entities([candidate_id]).get(candidate_id)
+   if not entity or "missing" in entity or not is_entity_type(entity, "author"):
+      return None
+   return candidate_id, entity
+
+
+def prompt_book_candidate(title: str, candidates: list[dict], input_fn=None) -> str | None:
+   print(f"\nChoose a Wikidata candidate for {title}, or press Enter to skip:")
+   for index, candidate in enumerate(candidates, start=1):
+      details = [candidate.get("description", "")]
+      if candidate.get("author_ids"):
+         details.append(f"Author IDs: {', '.join(candidate['author_ids'])}")
+      if candidate.get("aliases"):
+         details.append(f"Aliases: {', '.join(candidate['aliases'])}")
+      print(f"  {index}. {candidate['id']}  {candidate.get('label', '')}  {'; '.join(value for value in details if value)}")
+   choice = (input_fn or input)("Selection: ").strip()
+   if not choice:
+      return None
+   try:
+      index = int(choice)
+   except ValueError:
+      print("Invalid selection; leaving the book for review.")
+      return None
+   if index < 1 or index > len(candidates):
+      print("Invalid selection; leaving the book for review.")
+      return None
+   return candidates[index - 1]["id"]
+
+
+def confirm_book_candidate(
+   candidate_id: str | None,
+   candidates: list[dict],
+   wikidata: WikidataClient,
+   related_author_ids: list[str] | None = None,
+) -> tuple[str, dict] | None:
+   candidate_ids = {candidate.get("id") for candidate in candidates}
+   if not candidate_id or candidate_id not in candidate_ids:
+      return None
+   entity = wikidata.entities([candidate_id]).get(candidate_id)
+   if (
+      not entity
+      or "missing" in entity
+      or not is_entity_type(entity, "book")
+      or not book_matches_known_authors(entity, related_author_ids)
+   ):
+      return None
+   return candidate_id, entity
+
+
+def run_enrichment(
+   session,
+   wikidata: WikidataClient,
+   open_library: OpenLibraryClient,
+   refresh: bool,
+   stale_days: int,
+   limit: int | None,
+   interactive: bool = False,
+   input_fn=None,
+) -> tuple[dict, list[dict]]:
    print("Finding authors and books that need enrichment...", flush=True)
    authors = list(session.run(DUE_AUTHORS_QUERY, refresh=refresh, stale_days=stale_days))
    books = list(session.run(DUE_BOOKS_QUERY, refresh=refresh, stale_days=stale_days))
@@ -362,6 +481,12 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
       progress_detail = ""
       try:
          status, wikidata_id, entity, candidates = wikidata.resolve(name, "author", author["wikidata_id"])
+         if status == "needs_review" and interactive:
+            selection = prompt_author_candidate(name, candidates, input_fn)
+            accepted = confirm_author_candidate(selection, candidates, wikidata)
+            if accepted:
+               wikidata_id, entity = accepted
+               status = "matched"
          genders = labels_for_ids(wikidata, entity, "P21") if entity else []
          countries = labels_for_ids(wikidata, entity, "P27") if entity else []
          session.execute_write(write_author, name, status, wikidata_id, genders, countries)
@@ -390,6 +515,12 @@ def run_enrichment(session, wikidata: WikidataClient, open_library: OpenLibraryC
          status, wikidata_id, entity, candidates = wikidata.resolve(
             title, "book", book["wikidata_id"], related_author_ids=author_ids
          )
+         if status == "needs_review" and interactive:
+            selection = prompt_book_candidate(title, candidates, input_fn)
+            accepted = confirm_book_candidate(selection, candidates, wikidata, author_ids)
+            if accepted:
+               wikidata_id, entity = accepted
+               status = "matched"
          genres = labels_for_ids(wikidata, entity, "P136") if entity else []
          publication_year = year_from_claims(entity) if entity else None
          summary = None
@@ -451,6 +582,7 @@ def main() -> None:
    parser.add_argument("--refresh", action="store_true", help="Recheck all entities, including accepted matches")
    parser.add_argument("--stale-days", type=int, default=180, help="Refresh accepted matches older than this")
    parser.add_argument("--limit", type=int, help="Limit each entity type, useful for a small test run")
+   parser.add_argument("--interactive", action="store_true", help="Prompt to accept unresolved author and book candidates")
    parser.add_argument("--request-interval-min", type=float, default=5.0, help="Minimum randomized base interval in seconds")
    parser.add_argument("--request-interval-max", type=float, default=10.0, help="Maximum randomized base interval in seconds")
    parser.add_argument("--jitter-min", type=float, default=0.42, help="Minimum positive request jitter in seconds")
@@ -483,7 +615,15 @@ def main() -> None:
    report_path = args.review_report or PROJECT_ROOT / "data" / "reports" / f"enrichment_review_{datetime.now():%Y%m%d_%H%M%S}.csv"
    try:
       with driver.session(database=database) as session:
-         counts, reviews = run_enrichment(session, wikidata, open_library, args.refresh, args.stale_days, args.limit)
+         counts, reviews = run_enrichment(
+            session,
+            wikidata,
+            open_library,
+            args.refresh,
+            args.stale_days,
+            args.limit,
+            interactive=args.interactive,
+         )
       write_review_report(report_path, reviews)
       print("Enrichment complete:")
       for key, value in counts.items():

@@ -80,22 +80,43 @@ Run after ingestion:
 uv run python src/enrich/wikidata_enrich.py
 ```
 
-Wikidata is primary. A single exact-label candidate of the expected entity type
-is required for automatic matching; ambiguous or missing matches go to a
-timestamped CSV under `data/reports/` for review. Accepted Wikidata IDs are
-stored and reused. New and unresolved entities are checked each run; accepted
-matches are refreshed after 180 days. Use `--refresh` to recheck all records or
-`--limit 5` for a small trial. Each HTTP request waits a randomized 5–10 second
-base interval plus 0.42–1.42 seconds of positive jitter. Adjust the bounds with
+Wikidata is primary. Authors are automatically matched only when exactly one
+candidate has the same normalized English label and is verified as a human.
+When there is no unique exact human match but one or more verified human
+candidates exist, the author is reported as `needs_review`; `no_candidate`
+means the attempted search returned no verified human candidates, not that the
+author is absent from Wikidata. Search results are limited and ranked, so they
+cannot prove absence. Non-human results are excluded from author candidates.
+For books, automatic matching likewise requires one exact normalized English
+label and the existing book type check. When known authors have Wikidata IDs,
+candidates with conflicting `P50` author claims are excluded; candidates with
+no `P50` claims or at least one matching author remain eligible. Books with
+suitable candidates but no unique exact match are `needs_review`; `no_candidate`
+means the search found no candidates passing these checks. This does not prove
+that the work is absent from Wikidata. Review reports include suitable
+candidate IDs, labels, descriptions, English aliases, and book author IDs when
+available.
+
+Use `--interactive` to choose a numbered candidate for each author or book
+needing review; press Enter to skip. Author choices are revalidated as humans,
+and book choices are revalidated against the book type and known-author checks,
+before their IDs are stored. Skipped choices remain in the timestamped CSV under
+`data/reports/` for later review. Without `--interactive`, enrichment remains
+non-interactive and still writes the report. Stored accepted Wikidata IDs are
+reused on future runs. New and unresolved entities are checked each run;
+accepted matches are refreshed after 180 days. Use `--refresh` to recheck all
+records or `--limit 5` for a small trial. Each HTTP request waits a randomized
+5–10 second base interval plus 0.42–1.42 seconds of positive jitter. Adjust the bounds with
 `--request-interval-min`, `--request-interval-max`, `--jitter-min`, and
 `--jitter-max`. The script prints queue sizes and progress after each entity.
 `WIKIDATA_USER_AGENT` can be set in `.env`.
 
 Lookup errors do not erase stored facts. Gender and genre remain nodes. Wikidata
-P27 is modeled as `CITIZEN_OF`, not assumed to mean nationality. Open Library is
-used only as a secondary book-summary/year source when no summary exists and a
-unique exact title-and-author work match is found. Summary source is recorded;
-Wikidata descriptions are not treated as book summaries.
+P27 is modeled as `CITIZEN_OF`, not assumed to mean nationality. Open Library
+summary lookup remains separate from Wikidata book matching: it is used only
+when no summary exists and a unique exact title-and-author work match is found.
+Summary source is recorded; Wikidata descriptions are not treated as book
+summaries.
 
 ## Rerun order
 
