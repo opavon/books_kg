@@ -98,6 +98,26 @@ RETURN c.name AS citizenship,
        round(avg(r.score), 2) AS avgScore
 ORDER BY classifiedReads DESC;
 
+
+// ---------------------------------------------------------------------
+// 7. How many books have I read in each language?
+// ---------------------------------------------------------------------
+MATCH (r:Read)
+RETURN r.language_read AS language,
+       count(DISTINCT r) AS booksRead
+ORDER BY booksRead DESC, language;
+
+
+// ---------------------------------------------------------------------
+// 8. Compare canonical titles with the titles as read
+// ---------------------------------------------------------------------
+MATCH (r:Read)-[:OF_BOOK]->(b:Book)
+RETURN b.title AS canonicalTitle,
+       r.title_read AS titleRead,
+       r.language_read AS languageRead,
+       r.date AS dateFinished
+ORDER BY canonicalTitle;
+
 // A stronger version later: Neo4j Graph Data Science `gds.nodeSimilarity`
 // over an Author-Genre bipartite projection, which scores similarity
 // (e.g. Jaccard) rather than a raw overlap count.

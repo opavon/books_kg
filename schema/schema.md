@@ -1,6 +1,6 @@
 # Schema
 
-## Phase 1 — core
+## Phase 1 - core
 
 ```mermaid
 graph LR
@@ -34,6 +34,8 @@ graph LR
 |------------|--------------|-------|
 | `date`     | Neo4j `Date` | Built from `year_month`, day defaults to `01`. |
 | `score`    | float        | Decimal ratings are retained without imposing a score range. |
+| `title_read` | string     | Title as encountered while reading; distinct from the canonical `Book.title`. |
+| `language_read` | string  | Language of the reading, copied from the CSV after trimming surrounding whitespace. |
 | `book_id` | string       | Stable unique source ID; enforces one Read per Book. |
 
 ### Why a `Read` node instead of a relationship property?
@@ -54,7 +56,7 @@ The `Read` node wins for a few reasons:
    `Read`-to-`Read` date comparison rather than reasoning about
    relationship properties across different relationship types.
 
-## Phase 2 — enrichment
+## Phase 2 - enrichment
 
 ```mermaid
 graph LR
@@ -70,36 +72,21 @@ graph LR
 | Label     | Properties | Notes |
 |-----------|------------|-------|
 | `Book`    | `+ summary`, `+ publication_year` | Wikidata is primary; Open Library is used only as a summary/year fallback. |
-| `Gender`  | `name` (unique) | Node rather than a property — see rationale below. |
+| `Gender`  | `name` (unique) | Node rather than a property - see rationale below. |
 | `Genre`   | `name` (unique) | Node, not a property, because books can have multiple genres and you'll want to aggregate/traverse by genre (e.g. for similarity). |
 | `Country` | `name` (unique) | Node linked with `CITIZEN_OF`; Wikidata P27 is citizenship, not necessarily nationality. |
 
 ### Design principle used throughout
 
-Every enrichment fact — genre, citizenship, gender — is something you
-want to **group, count, and aggregate by** for the bias check and
-recommendations ("what % of books I've read are by women," "which
-countries am I underrepresenting"). That's the actual shared property
-across all three, so all three are modeled as nodes rather than scalar
-properties: `(:Author)-[:HAS_GENDER]->(:Gender {name})`,
-`(:Author)-[:CITIZEN_OF]->(:Country {name})`,
-`(:Book)-[:HAS_GENRE]->(:Genre {name})`.
+Every enrichment fact - genre, citizenship, gender - is something you want to **group, count, and aggregate by** for the bias check and recommendations ("what % of books I've read are by women," "which countries am I underrepresenting"). That's the actual shared property across all three, so all three are modeled as nodes rather than scalar properties: `(:Author)-[:HAS_GENDER]->(:Gender {name})`, `(:Author)-[:CITIZEN_OF]->(:Country {name})`, `(:Book)-[:HAS_GENRE]->(:Genre {name})`.
 
-Wikidata P21 (sex or gender) and P27 (country of citizenship) point to
-entities, not literal strings. The graph preserves those entities and
-does not relabel citizenship as nationality.
+Wikidata P21 (sex or gender) and P27 (country of citizenship) point to entities, not literal strings. The graph preserves those entities and does not relabel citizenship as nationality.
 
-A fact stays a plain **property** when it's inherently singular and
-has no substructure worth attaching to later — `Read.score`, `Read.date`,
-`Book.summary`. There's nothing to aggregate "by score" in the same
-sense; score is the thing being aggregated, not a grouping key.
+A fact stays a plain **property** when it's inherently singular and has no substructure worth attaching to later - `Read.score`, `Read.date`, `Read.title_read`, `Read.language_read`, and `Book.summary`. A scalar property can still be useful as an aggregation key, as with counting reads by `language_read`.
 
 ## Constraints
 
-See `constraints.cypher`. Identity constraints are on `Book.book_id` and
-`Read.book_id`; names remain unique for authors and enrichment nodes.
-External IDs are stored as references, not local identity keys, because
-different local records can resolve to the same Wikidata work/person.
+See `constraints.cypher`. Identity constraints are on `Book.book_id` and `Read.book_id`; names remain unique for authors and enrichment nodes. External IDs are stored as references, not local identity keys, because different local records can resolve to the same Wikidata work/person.
 
 ## Open modeling questions for later
 
@@ -110,31 +97,8 @@ different local records can resolve to the same Wikidata work/person.
 
 ## Ingestion and enrichment behavior
 
-The single CSV in `data/raw/` is cumulative and append-only. Its current
-columns are `book_id,title,title_read,language_read,author,year_month,score`.
-Ingestion uses `book_id`, `title`, `author`, `year_month`, and `score`;
-`title_read` and `language_read` remain source metadata and are not stored in
-the graph. Ingestion validates the whole file before connecting to Neo4j,
-preserves IDs as strings, accepts finite decimal scores, and splits author
-names on `/`. Re-running the same file is idempotent: Books and Reads are
-merged by `book_id`, and Authors and relationships are merged by normalized
-name.
+The single CSV selected by `BOOKS_CSV_PATH` is cumulative and append-only. Its columns are `book_id,title,title_read,language_read,author,year_month,score`. Ingestion stores `title_read` and `language_read` on `Read`; both fields and their headers are required, and blank values are rejected. Surrounding whitespace is trimmed. `Book.title` remains the canonical title, while `Read.title_read` records the title as encountered while reading. Ingestion also preserves IDs as strings, accepts finite decimal scores, and splits author names on `/`. Re-running the same file is idempotent; it also backfills these properties on existing `Read` nodes.
 
-Start with a fresh database and apply the constraints before the first load.
-Every source row must have a stable `book_id`; ingestion does not migrate
-Books or Reads from an older title-keyed schema. The source CSV splits authors
-with `/`, and ingestion creates one Author node and `WROTE` relationship per name.
+Start with a fresh database and apply the constraints before the first load. Every source row must have a stable `book_id`; ingestion does not migrate Books or Reads from an older title-keyed schema. The source CSV splits authors with `/`, and ingestion creates one Author node and `WROTE` relationship per name.
 
-Wikidata is the primary enrichment source. Authors and books are auto-accepted
-only for one exact normalized English-label candidate that passes the
-entity-type check; known book authors also filter conflicting creator claims.
-Other suitable candidates are `needs_review`; `no_candidate` means the
-attempted search found no suitable candidate and does not prove absence from
-Wikidata. Use `--interactive` to accept a numbered author or book candidate;
-accepted IDs are stored and reused on future runs. New and unresolved entities
-are checked each run; accepted matches are refreshed after 180 days or with
-`--refresh`. Lookup errors do not erase previously stored facts. Author P27 is
-modeled as `CITIZEN_OF`, not nationality. Open Library summary lookup remains
-separate: it is queried only when a book has no stored summary, and a summary
-is saved only for one exact title-and-author work match, with `summary_source`
-recorded. Wikidata descriptions are not misrepresented as book summaries.
+Wikidata is the primary enrichment source. Authors and books are auto-accepted only for one exact normalized English-label candidate that passes the entity-type check; known book authors also filter conflicting creator claims. Other suitable candidates are `needs_review`; `no_candidate` means the attempted search found no suitable candidate and does not prove absence from Wikidata. Use `--interactive` to accept a numbered author or book candidate; accepted IDs are stored and reused on future runs. New and unresolved entities are checked each run; accepted matches are refreshed after 180 days or with `--refresh`. Lookup errors do not erase previously stored facts. Author P27 is modeled as `CITIZEN_OF`, not nationality. Open Library summary lookup remains separate: it is queried only when a book has no stored summary, and a summary is saved only for one exact title-and-author work match, with `summary_source` recorded. Wikidata descriptions are not misrepresented as book summaries.

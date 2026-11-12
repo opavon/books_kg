@@ -11,9 +11,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
-RAW_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
-SOURCE_CSV = RAW_DATA_DIR / "books_raw_20261001.csv"
-REQUIRED_COLUMNS = {"book_id", "title", "author", "year_month", "score"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REQUIRED_COLUMNS = {
+    "book_id",
+    "title",
+    "title_read",
+    "language_read",
+    "author",
+    "year_month",
+    "score",
+}
 BATCH_SIZE = 100
 
 UPSERT_QUERY = """
@@ -22,8 +29,10 @@ MERGE (b:Book {book_id: row.book_id})
 ON CREATE SET b.title = row.title
 ON MATCH SET b.title = row.title
 MERGE (r:Read {book_id: row.book_id})
-ON CREATE SET r.date = date(row.date), r.score = row.score
-ON MATCH SET r.date = date(row.date), r.score = row.score
+ON CREATE SET r.date = date(row.date), r.score = row.score,
+              r.title_read = row.title_read, r.language_read = row.language_read
+ON MATCH SET r.date = date(row.date), r.score = row.score,
+             r.title_read = row.title_read, r.language_read = row.language_read
 MERGE (r)-[:OF_BOOK]->(b)
 WITH row, b
 UNWIND row.authors AS author_name
@@ -37,8 +46,17 @@ OPTIONAL MATCH (b:Book {book_id: book_id})
 OPTIONAL MATCH (r:Read {book_id: book_id})
 OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
 RETURN book_id, b.title AS title, r.date AS date, r.score AS score,
+       r.title_read AS title_read, r.language_read AS language_read,
        collect(DISTINCT a.name) AS authors
 """
+
+
+def resolve_source_csv(configured_path: str | None) -> Path:
+    if configured_path is None or not configured_path.strip():
+        raise ValueError("BOOKS_CSV_PATH must be set in .env to the cumulative CSV file")
+    csv_path = Path(configured_path).expanduser()
+    return csv_path if csv_path.is_absolute() else PROJECT_ROOT / csv_path
+
 
 def normalize_author(name: str) -> list[str]:
     authors = [part.strip() for part in name.split("/")]
@@ -76,6 +94,8 @@ def load_rows(csv_path: Path) -> list[dict]:
             row_errors = []
             book_id = (raw.get("book_id") or "").strip()
             title = (raw.get("title") or "").strip()
+            title_read = (raw.get("title_read") or "").strip()
+            language_read = (raw.get("language_read") or "").strip()
             author_text = raw.get("author") or ""
             if None in raw:
                 row_errors.append("too many CSV fields")
@@ -87,6 +107,10 @@ def load_rows(csv_path: Path) -> list[dict]:
                 seen_ids.add(book_id)
             if not title:
                 row_errors.append("title is blank")
+            if not title_read:
+                row_errors.append("title_read is blank")
+            if not language_read:
+                row_errors.append("language_read is blank")
             try:
                 authors = normalize_author(author_text)
             except ValueError as exc:
@@ -116,6 +140,8 @@ def load_rows(csv_path: Path) -> list[dict]:
                     {
                         "book_id": book_id,
                         "title": title,
+                        "title_read": title_read,
+                        "language_read": language_read,
                         "authors": authors,
                         "date": date_value,
                         "score": score,
@@ -144,6 +170,8 @@ def upsert_batch(tx, rows: list[dict]) -> dict:
             previous["title"] != row["title"]
             or previous["date"].iso_format() != row["date"]
             or float(previous["score"]) != row["score"]
+            or previous["title_read"] != row["title_read"]
+            or previous["language_read"] != row["language_read"]
             or not set(row["authors"]).issubset(old_authors)
         ):
             counts["updated"] += 1
@@ -164,10 +192,11 @@ def sync_rows(session, rows: list[dict]) -> dict:
 
 
 def main() -> None:
-    rows = load_rows(SOURCE_CSV)
-    print(f"Validated {len(rows)} rows from {SOURCE_CSV}")
-
     load_dotenv()
+    source_csv = resolve_source_csv(os.getenv("BOOKS_CSV_PATH"))
+    rows = load_rows(source_csv)
+    print(f"Validated {len(rows)} rows from {source_csv}")
+
     uri = os.environ["NEO4J_URI"]
     user = os.environ["NEO4J_USER"]
     password = os.environ["NEO4J_PASSWORD"]

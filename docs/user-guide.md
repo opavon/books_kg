@@ -10,17 +10,24 @@ The CSV is the source of truth for books you have read. Wikidata supplies option
 
 ## 1. Start Neo4j
 
-1. Install Neo4j Desktop from [neo4j.com/download](https://neo4j.com/download/) if you do not already have it.
-2. In Desktop, create a local DBMS and start it. A DBMS is the local database server; it must be running while you apply the schema or run either script.
-3. Use the default database (commonly named `neo4j`), or create/use the database name you prefer. Record the Bolt URI, database name, username, and password. A common local URI is `bolt://localhost:7687`. The database name must already exist in the running DBMS; `books_kg` is not created automatically by these scripts.
+1. Install [Neo4j Desktop](https://neo4j.com/download/) if it is not already installed.
+2. In Neo4j Desktop, create a local DBMS (database management system). Go to `Data services > Local instances > Create instance`. Choose a Neo4j version, set a password for the `neo4j` user, and start the DBMS. Neo4j Desktop's labels can vary by version; look for the local DBMS/instance area.
+3. Use the default `neo4j` database for this project. Record the Bolt URI (commonly `bolt://localhost:7687`), username (`neo4j`), and the password you just set. The scripts do not create a DBMS or database.
 
 Use that same DBMS and database for the schema, ingestion, enrichment, and queries. Do not use your Neo4j website sign-in as the database password.
 
 ## 2. Prepare Python and Credentials
 
-Install `uv` if needed, then open PowerShell in the repository folder and run:
+Install `uv` from PowerShell with [WinGet](https://docs.astral.sh/uv/getting-started/installation/#winget):
 
 ```powershell
+winget install --id=astral-sh.uv -e
+```
+
+Close and reopen PowerShell, then move to the repository root. The project requires `Python 3.14.3`; install it and the project dependencies with:
+
+```powershell
+uv python install 3.14.3
 uv sync
 Copy-Item .env.example .env
 ```
@@ -32,35 +39,36 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your-local-database-password
 NEO4J_DB_NAME=neo4j
+BOOKS_CSV_PATH=data/raw/books_raw_<date>.csv
 ```
 
-Set `NEO4J_DB_NAME` to the database name you selected in Neo4j Desktop, and `NEO4J_URI` to the connection URI in Neo4j Desktop. Keep `.env` private; do not commit it or paste its password into messages. The raw CSV is also ignored by Git because it contains personal reading data.
+Keep `NEO4J_DB_NAME=neo4j` and set `NEO4J_URI` to the Bolt connection URI shown by Neo4j Desktop. `BOOKS_CSV_PATH` selects the cumulative CSV; change the example value to your file's path if needed. Relative paths are resolved from the repository root, and absolute paths are also accepted. Keep `.env` private; do not commit it or paste its password into messages. The raw CSV is also ignored by Git because it contains personal reading data.
 
 ## 3. Apply the Graph Schema
 
-The schema file creates uniqueness constraints used by the loader to prevent duplicate authors, books, reads, genres, countries, and genders. It also removes the old title-based book constraint, because a stable `book_id` is now the book identity and title is display text.
+The schema file creates uniqueness constraints used by the loader and enrichment script to prevent duplicate authors, books, reads, genres, countries, and genders. A book's stable `book_id` is its identity; its title is display text.
 
-The easiest option is Neo4j Desktop's Query tool:
+The easiest option to implement the schema is Neo4j Desktop's Query tool:
 
-1. Open the running DBMS and choose **Query** for the target database.
-2. Open `schema/constraints.cypher` in VS Code.
-3. Copy and run each Cypher statement, including the `DROP CONSTRAINT` statement. Do not run the `//` comment lines.
+1. Open the running local DBMS in Neo4j Desktop and choose **Query** for its `neo4j` database. Confirm the editor is connected to that database.
+2. In VSCode, open `schema/constraints.cypher` in VS Code.
+3. Copy and run the complete file. Its `//` lines are comments and can remain.
 
-If `cypher-shell` is installed and available in PowerShell, you can run the whole file instead. Substitute your connection details:
+Apply the constraints once, before the first import. They use `IF NOT EXISTS`, so they are safe to reapply; routine CSV updates do not need this step. No `DROP` statement or migration is needed for a new database.
+
+### Optional: Use Cypher Shell
+
+Cypher Shell is not needed if you use Neo4j Desktop's Query tool. To run the schema from PowerShell instead, install the standalone [Cypher Shell](https://neo4j.com/docs/operations-manual/current/tools/cypher-shell/) from the [Neo4j Deployment Center](https://neo4j.com/deployment-center/?cypher-shell). Standalone Cypher Shell requires Java 21. Install a Windows x64 Java 21 JDK, such as [Eclipse Temurin](https://adoptium.net/temurin/releases/?version=21), and enable the installer options to add Java to `PATH` and set `JAVA_HOME`; confirm it with `java -version`. Extract the Cypher Shell package, then either add its `bin` directory to `PATH` or invoke `cypher-shell.bat` by its full path. Verify it with `cypher-shell --version`. Then run this at the repository root, substituting your connection details:
 
 ```powershell
 cypher-shell -a bolt://localhost:7687 -u neo4j -d neo4j -f schema/constraints.cypher
 ```
 
-Cypher Shell prompts for the password when `-p` is omitted. The constraints use `IF NOT EXISTS` and can be applied again. The title constraint is explicitly dropped so the graph can use `book_id` for identity.
+Omitting `-p` lets Cypher Shell prompt for the database password.
 
 ## 4. Maintain the Cumulative CSV
 
-The only source file is:
-
-```text
-data/raw/books_raw_20261001.csv
-```
+The source CSV is selected by `BOOKS_CSV_PATH` in `.env`. The sample value is `data/raw/books_raw_<date>.csv`; use your actual file path if its name or location differs.
 
 Its header row must be:
 
@@ -74,9 +82,7 @@ Append one row per new book. The current data contains examples like:
 0284,EXAMPLE BOOK,EXAMPLE BOOK,en,Jane Writer/John Writer,2026_10,8.5
 ```
 
-`title_read` and `language_read` are retained in the source CSV but are not
-currently imported into Neo4j. The loader uses `book_id`, `title`, `author`,
-`year_month`, and `score`.
+`title_read` and `language_read` are required, trimmed, and stored on the `Read` node. They must not be blank. `Book.title` remains the canonical title; `Read.title_read` preserves the title as you encountered it while reading. `Read.language_read` can be used to group reading events by language.
 
 Follow these rules:
 
@@ -86,7 +92,8 @@ Follow these rules:
 - Separate multiple authors with `/`. The loader trims each name and creates a separate author node/relationship.
 - Enter `year_month` as `YYYY_MM`, such as `2026_10`. The graph stores the date as the first day of that month.
 - Scores must be finite numbers. Decimal scores and any score scale are accepted; the script does not impose a rating range.
-- Use normal CSV quoting for fields that contain commas. Avoid blank IDs, titles, or authors.
+- Use normal CSV quoting for fields that contain commas. Avoid blank IDs, titles, `title_read`, `language_read`, or authors.
+- Use a consistent language code or label (for example, `en`) so language counts group as expected.
 
 Do not edit already-loaded rows as part of the normal workflow. The file is intended to be append-only. If an existing book's details or ID need correction, pause and handle it deliberately rather than assigning that book a new ID.
 
@@ -106,7 +113,7 @@ python src/ingest/load_books.py
 
 The loader validates the entire CSV before it writes anything. If it reports invalid rows, correct the CSV and rerun; it will not load only the valid subset. On success it reports inserted, updated, and unchanged rows. Rerunning the same cumulative file is safe: existing `Book` and `Read` nodes are matched by `book_id`, and authors and relationships are merged rather than duplicated.
 
-Start with a fresh database and apply the constraints before the first import.
+Apply the constraints once before the first import, as described above. Start with a fresh database: the loader does not migrate data from an older title-keyed graph.
 The CSV already contains a stable `book_id` for every row, so the loader does
 not migrate data from an older title-keyed graph. Slash-separated authors in
 the CSV are normalized into separate Author nodes and `WROTE` relationships.
@@ -159,7 +166,7 @@ Wikidata P27 is country of citizenship, which is not necessarily nationality; th
 
 ## 7. Explore the Graph
 
-Open **Query** for the same running database in Neo4j Desktop. Open `src/queries/analytics.cypher`, then copy and run one query at a time. Neo4j Browser/Query supports the Cypher statements directly. Queries 1, 2, 5, and 6 do not need parameters. Query 4 needs genre enrichment to have returned usable genre matches.
+Open **Query** for the same running database in Neo4j Desktop. Open `src/queries/analytics.cypher`, then copy and run one query at a time. Neo4j Browser/Query supports the Cypher statements directly. Queries 1, 2, and 5–8 do not need parameters. Query 4 needs genre enrichment to have returned usable genre matches.
 
 ### Use Case: Compare Scores by Month or Season
 
@@ -181,6 +188,14 @@ After enrichment has added `HAS_GENRE` relationships, run query 4. It finds the 
 
 Run query 5 to group reads by known author gender, and query 6 to group them by known author citizenship. Each result includes `classifiedReads` and `totalReads`; compare these to see how many reads have relevant enrichment. Unknown or unmatched authors are not silently assigned to a category. A book with multiple authors may contribute to multiple categories when those authors have different known facts, so category totals can overlap.
 
+### Use Case: Count Books by Reading Language
+
+Run query 7 to count your `Read` nodes by `language_read`. The loader requires this value and trims surrounding whitespace; use consistent language codes or labels in the CSV to avoid splitting one language across multiple groups.
+
+### Use Case: Compare Canonical and Read Titles
+
+Run query 8 to return `Book.title` alongside `Read.title_read`, language, and reading date. This keeps the canonical work title separate from the title you recorded as read.
+
 ### Use Case: View the Graph
 
 To display a small graph, run this in Query and select the **Graph** results view:
@@ -195,7 +210,7 @@ LIMIT 25;
 
 - **Connection refused:** Check that the Neo4j DBMS is started and that `NEO4J_URI` uses its Bolt address.
 - **Authentication/database error:** Check `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DB_NAME` in `.env`. Confirm the database exists and is selected in the Query tool.
-- **Database not found:** `NEO4J_DB_NAME` in `.env` must match a database that already exists in this DBMS. For a typical Neo4j Desktop setup, change `NEO4J_DB_NAME=books_kg` to `NEO4J_DB_NAME=neo4j`. Alternatively, create a database named `books_kg` in Neo4j Desktop. Save `.env` and rerun the script.
+- **Database not found:** Confirm `NEO4J_DB_NAME=neo4j` in `.env` and that the local DBMS is running. The scripts do not create databases.
 - **Missing or invalid CSV data:** Check the header row and the line numbers in the loader error. No CSV rows are written if validation fails.
 - **No genre/similarity results:** Run enrichment, then inspect the review report. Some books may not have an unambiguous Wikidata match or genre claim.
 - **Some reads are not in gender/citizenship groups:** Those queries intentionally include only authors with accepted enrichment facts.

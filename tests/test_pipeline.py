@@ -22,6 +22,7 @@ from src.ingest.load_books import (
     EXISTING_QUERY,
     UPSERT_QUERY,
     load_rows,
+    resolve_source_csv,
     upsert_batch,
 )
 
@@ -52,6 +53,8 @@ class InMemoryTransaction:
                         "title": record["title"],
                         "date": FakeDate(record["date"]),
                         "score": record["score"],
+                        "title_read": record.get("title_read"),
+                        "language_read": record.get("language_read"),
                         "authors": record["authors"],
                     }
                     for book_id in parameters["book_ids"]
@@ -65,6 +68,8 @@ class InMemoryTransaction:
                     "title": row["title"],
                     "date": row["date"],
                     "score": row["score"],
+                    "title_read": row["title_read"],
+                    "language_read": row["language_read"],
                     "authors": set(previous.get("authors", set())) | set(row["authors"]),
                 }
             return FakeResult()
@@ -188,6 +193,19 @@ class MatchedBookWikidataClient(FakeWikidataClient):
 
 
 class PipelineTests(unittest.TestCase):
+    def test_source_csv_path_supports_relative_absolute_and_missing_values(self):
+        project_root = Path(__file__).resolve().parents[1]
+        self.assertEqual(
+            resolve_source_csv("data/raw/books.csv"),
+            project_root / "data" / "raw" / "books.csv",
+        )
+
+        absolute_path = Path(__file__).resolve()
+        self.assertEqual(resolve_source_csv(str(absolute_path)), absolute_path)
+
+        with self.assertRaisesRegex(ValueError, "BOOKS_CSV_PATH"):
+            resolve_source_csv("")
+
     def parse_csv(self, content):
         temporary = tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8", delete=False)
         try:
@@ -199,37 +217,61 @@ class PipelineTests(unittest.TestCase):
 
     def test_csv_preserves_id_decimals_and_splits_authors(self):
         rows = self.parse_csv(
-            "book_id,title,author,year_month,score\n"
-            "0007,Example,A / B,2024_02,8.5\n"
+            "book_id,title,title_read,language_read,author,year_month,score\n"
+            "0007,Example,Read title,en,A / B,2024_02,8.5\n"
         )
         self.assertEqual(rows[0]["book_id"], "0007")
         self.assertEqual(rows[0]["score"], 8.5)
+        self.assertEqual(rows[0]["title_read"], "Read title")
+        self.assertEqual(rows[0]["language_read"], "en")
         self.assertEqual(rows[0]["authors"], ["A", "B"])
         self.assertEqual(rows[0]["date"], "2024-02-01")
+
+    def test_csv_trims_and_requires_read_title_and_language(self):
+        rows = self.parse_csv(
+            "book_id,title,title_read,language_read,author,year_month,score\n"
+            "1,Canonical,  Read title  , en ,Author,2024_01,8\n"
+        )
+        self.assertEqual(rows[0]["title_read"], "Read title")
+        self.assertEqual(rows[0]["language_read"], "en")
+
+        with self.assertRaisesRegex(ValueError, "title_read is blank"):
+            self.parse_csv(
+                "book_id,title,title_read,language_read,author,year_month,score\n"
+                "1,Canonical, ,en,Author,2024_01,8\n"
+            )
+        with self.assertRaisesRegex(ValueError, "language_read is blank"):
+            self.parse_csv(
+                "book_id,title,title_read,language_read,author,year_month,score\n"
+                "1,Canonical,Read title, ,Author,2024_01,8\n"
+            )
 
     def test_csv_reports_duplicate_ids_bad_dates_and_scores(self):
         with self.assertRaisesRegex(ValueError, "line 3: duplicate book_id"):
             self.parse_csv(
-                "book_id,title,author,year_month,score\n"
-                "001,One,A,2024_01,8\n"
-                "001,Two,B,2024_13,nan\n"
+                "book_id,title,title_read,language_read,author,year_month,score\n"
+                "001,One,One,en,A,2024_01,8\n"
+                "001,Two,Two,en,B,2024_13,nan\n"
             )
 
     def test_csv_rejects_empty_author_segments(self):
         with self.assertRaisesRegex(ValueError, "nonblank names"):
-            self.parse_csv("book_id,title,author,year_month,score\n1,Title,A//B,2024_01,8\n")
+            self.parse_csv("book_id,title,title_read,language_read,author,year_month,score\n1,Title,Title,en,A//B,2024_01,8\n")
 
     def test_csv_rejects_float_overflow(self):
         with self.assertRaisesRegex(ValueError, "finite number"):
-            self.parse_csv("book_id,title,author,year_month,score\n1,Title,A,2024_01,1e10000\n")
+            self.parse_csv("book_id,title,title_read,language_read,author,year_month,score\n1,Title,Title,en,A,2024_01,1e10000\n")
 
     def test_csv_requires_all_columns(self):
         with self.assertRaisesRegex(ValueError, "missing required columns: score"):
-            self.parse_csv("book_id,title,author,year_month\n1,Title,A,2024_01\n")
+            self.parse_csv("book_id,title,title_read,language_read,author,year_month\n1,Title,Title,en,A,2024_01\n")
+
+        with self.assertRaisesRegex(ValueError, "missing required columns: language_read"):
+            self.parse_csv("book_id,title,title_read,author,year_month,score\n1,Title,Title,A,2024_01,8\n")
 
     def test_csv_rejects_duplicate_headers(self):
         with self.assertRaisesRegex(ValueError, "duplicate column headers"):
-            self.parse_csv("book_id,title,author,year_month,score,score\n")
+            self.parse_csv("book_id,title,title_read,language_read,author,year_month,score,score\n")
 
     def test_http_client_applies_random_interval_and_positive_jitter(self):
         current_time = [0.0]
@@ -262,6 +304,8 @@ class PipelineTests(unittest.TestCase):
         row = {
             "book_id": "0001",
             "title": "Title",
+            "title_read": "Title as read",
+            "language_read": "en",
             "authors": ["A", "B"],
             "date": "2024-01-01",
             "score": 8.5,
@@ -270,8 +314,51 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(upsert_batch(transaction, [row]), {"inserted": 0, "updated": 0, "unchanged": 1})
         changed = {**row, "score": 9.0}
         self.assertEqual(upsert_batch(transaction, [changed]), {"inserted": 0, "updated": 1, "unchanged": 0})
+        changed_title_read = {**changed, "title_read": "Alternate read title"}
+        self.assertEqual(
+            upsert_batch(transaction, [changed_title_read]),
+            {"inserted": 0, "updated": 1, "unchanged": 0},
+        )
+        changed_language_read = {**changed_title_read, "language_read": "fr"}
+        self.assertEqual(
+            upsert_batch(transaction, [changed_language_read]),
+            {"inserted": 0, "updated": 1, "unchanged": 0},
+        )
+        self.assertEqual(
+            upsert_batch(transaction, [changed_language_read]),
+            {"inserted": 0, "updated": 0, "unchanged": 1},
+        )
+        stored = transaction.records["0001"]
+        self.assertEqual(stored["title"], "Title")
+        self.assertEqual(stored["title_read"], "Alternate read title")
+        self.assertEqual(stored["language_read"], "fr")
         self.assertIn("MERGE (b:Book {book_id: row.book_id})", UPSERT_QUERY)
         self.assertIn("MERGE (r:Read {book_id: row.book_id})", UPSERT_QUERY)
+
+    def test_reimport_backfills_read_fields_on_existing_records(self):
+        transaction = InMemoryTransaction()
+        transaction.records["0001"] = {
+            "title": "Canonical title",
+            "date": "2024-01-01",
+            "score": 8.5,
+            "authors": {"Author"},
+        }
+        row = {
+            "book_id": "0001",
+            "title": "Canonical title",
+            "title_read": "Title as read",
+            "language_read": "en",
+            "authors": ["Author"],
+            "date": "2024-01-01",
+            "score": 8.5,
+        }
+
+        self.assertEqual(
+            upsert_batch(transaction, [row]),
+            {"inserted": 0, "updated": 1, "unchanged": 0},
+        )
+        self.assertEqual(transaction.records["0001"]["title_read"], "Title as read")
+        self.assertEqual(transaction.records["0001"]["language_read"], "en")
 
     def test_wikidata_accepts_one_exact_human_only(self):
         person = {
