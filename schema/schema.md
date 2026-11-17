@@ -24,8 +24,11 @@ graph LR
 | `wikidata_id` | string | Optional accepted Wikidata entity reference. |
 | `openlibrary_id` | string | Optional work ID used for summary fallback; not a local identity key. |
 | `publication_year` | integer | From Wikidata, or Open Library when Wikidata has no year. |
+| `publication_year_source` | string | `wikidata` or `openlibrary`; records provenance for safe replacement. |
 | `summary` | string | Open Library work description only; Wikidata descriptions are not treated as summaries. |
 | `summary_source` | string | Provenance for the stored summary. |
+| `openlibrary_status` | string | `matched`, `ambiguous`, `not_found`, or `error`; separate from Wikidata status. |
+| `openlibrary_checked_at` | datetime | Last Open Library summary lookup. |
 | `wikidata_status` | string | `matched`, `needs_review`, `no_candidate`, or `error`. `no_candidate` means the attempted search found no book passing its type and known-author checks; it does not prove absence from Wikidata. |
 | `wikidata_checked_at` | datetime | Last lookup attempt. |
 
@@ -95,10 +98,23 @@ See `constraints.cypher`. Identity constraints are on `Book.book_id` and `Read.b
 - `book_id` is the source identity. Do not reuse or regenerate an ID for a
    different book. Titles may repeat without merging distinct books.
 
-## Ingestion and enrichment behavior
+## Ingestion
 
-The single CSV selected by `BOOKS_CSV_PATH` is cumulative and append-only. Its columns are `book_id,title,title_read,language_read,author,year_month,score`. Ingestion stores `title_read` and `language_read` on `Read`; both fields and their headers are required, and blank values are rejected. Surrounding whitespace is trimmed. `Book.title` remains the canonical title, while `Read.title_read` records the title as encountered while reading. Ingestion also preserves IDs as strings, accepts finite decimal scores, and splits author names on `/`. Re-running the same file is idempotent; it also backfills these properties on existing `Read` nodes.
+The append-only CSV selected by `BOOKS_CSV_PATH` contains
+`book_id,title,title_read,language_read,author,year_month,score`. The loader
+stores `title_read`, `language_read`, `date`, and `score` on `Read`; it stores
+the canonical title on `Book` and creates one `Author`/`WROTE` relationship
+per slash-separated author. IDs are preserved as strings. Each CSV row must
+have a stable unique `book_id`; the loader does not migrate data from an older
+title-keyed graph. See the [user guide](../docs/user-guide.md) for CSV
+validation and correction instructions.
 
-Start with a fresh database and apply the constraints before the first load. Every source row must have a stable `book_id`; ingestion does not migrate Books or Reads from an older title-keyed schema. The source CSV splits authors with `/`, and ingestion creates one Author node and `WROTE` relationship per name.
+## Enrichment Provenance
 
-Wikidata is the primary enrichment source. Authors and books are auto-accepted only for one exact normalized English-label candidate that passes the entity-type check; known book authors also filter conflicting creator claims. Other suitable candidates are `needs_review`; `no_candidate` means the attempted search found no suitable candidate and does not prove absence from Wikidata. Use `--interactive` to accept a numbered author or book candidate; accepted IDs are stored and reused on future runs. New and unresolved entities are checked each run; accepted matches are refreshed after 180 days or with `--refresh`. Lookup errors do not erase previously stored facts. Author P27 is modeled as `CITIZEN_OF`, not nationality. Open Library summary lookup remains separate: it is queried only when a book has no stored summary, and a summary is saved only for one exact title-and-author work match, with `summary_source` recorded. Wikidata descriptions are not misrepresented as book summaries.
+Wikidata IDs are external references, not local identity keys. Wikidata P21
+and P27 facts are modeled as `HAS_GENDER` and `CITIZEN_OF` relationships;
+genre facts are `HAS_GENRE` relationships. Open Library summary and publication
+year values carry their own source metadata, independently from Wikidata
+matching. Wikidata descriptions are not stored as book summaries. Operational
+statuses, retries, and correction procedures are documented in the
+[user guide](../docs/user-guide.md).

@@ -94,6 +94,7 @@ Follow these rules:
 - Scores must be finite numbers. Decimal scores and any score scale are accepted; the script does not impose a rating range.
 - Use normal CSV quoting for fields that contain commas. Avoid blank IDs, titles, `title_read`, `language_read`, or authors.
 - Use a consistent language code or label (for example, `en`) so language counts group as expected.
+- Escape literal double quotes inside a quoted CSV field by doubling them (`""`). The loader rejects malformed quoting and reports the CSV line number.
 
 Do not edit already-loaded rows as part of the normal workflow. The file is intended to be append-only. If an existing book's details or ID need correction, pause and handle it deliberately rather than assigning that book a new ID.
 
@@ -126,9 +127,25 @@ Run enrichment after ingestion:
 uv run python src/enrich/wikidata_enrich.py
 ```
 
-The script checks new and unresolved authors/books and refreshes successful matches older than 180 days. Wikidata is the primary source. An author is automatically matched only when exactly one candidate has the same normalized English label and is verified as a human. A book is automatically matched only when exactly one candidate has the same normalized English label and passes the existing book type check. When known authors have Wikidata IDs, a book candidate is excluded if its `P50` claims conflict with all of them; candidates without `P50` claims or with at least one matching author remain eligible.
+The default run checks new, unresolved, and stale Wikidata author/book records. It automatically accepts only a unique exact-label candidate that passes entity validation; book candidates are also checked against known author claims. Open Library summary lookups have independent status and retry tracking.
 
-For either type, suitable candidates without a unique exact match produce `needs_review`. `no_candidate` means the attempted search found no suitable candidate (a verified human for an author, or a book passing its type and known-author checks). It does not prove that the person or work is absent from Wikidata: results are ranked and limited. Non-human results are excluded from author candidates, and non-book or known-author-conflicting results are excluded from book candidates.
+Wikidata statuses and actions:
+
+| Status | Meaning | Next action |
+| --- | --- | --- |
+| `matched` | One unique exact candidate was accepted, automatically or by review. | Normally skipped until stale; `--refresh` refreshes facts for its stored QID. |
+| `needs_review` | Suitable candidates exist but no unique exact match was found. | Use `--interactive` or replay the report with `--from-report`. |
+| `no_candidate` | The bounded search returned no suitable candidate; this does not prove absence. | Retry normally later, correct the source title/name if needed, or supply a manually verified QID. There is nothing to choose interactively. |
+| `error` | The external lookup failed. | A normal run retries it; persistent errors remain report rows. |
+
+Open Library summary statuses are separate from Wikidata:
+
+| Status | Meaning | Next action |
+| --- | --- | --- |
+| `matched` | A work was accepted; its ID is stored even if it has no description. | It is not prompted again unless summary refresh is requested. |
+| `ambiguous` | Multiple exact title-and-author works were found. Candidate `matched: true` means exact title and author; only exact selectable work IDs are offered interactively. | Use `--interactive --entity-type book_summary --summary-status ambiguous` or replay the report. |
+| `not_found` | No exact Open Library work was found. | Retry later or verify the source title/author; there is no candidate to select. |
+| `error` | The Open Library request failed. | Summary errors are retried independently on a normal run. |
 
 You can run a small trial first:
 
@@ -136,10 +153,10 @@ You can run a small trial first:
 uv run python src/enrich/wikidata_enrich.py --limit 5
 ```
 
-`--limit 5` checks up to five authors and five books. To force a refresh of every author and book, including recent matches, use:
+`--limit 5` checks up to five authors, five books, and five summaries after sorting each queue; it is not an ID selector. `--refresh` re-fetches facts for stored Wikidata QIDs and does not search for a replacement. It may make many network requests. To refresh Open Library summaries independently, use:
 
 ```powershell
-uv run python src/enrich/wikidata_enrich.py --refresh
+uv run python src/enrich/wikidata_enrich.py --refresh-summaries
 ```
 
 Each HTTP request waits a randomized 5-10 second base interval plus 0.42–1.42
@@ -152,17 +169,166 @@ identifier in `.env`:
 WIKIDATA_USER_AGENT=books-kg/0.1 (your contact information)
 ```
 
-Author and book `needs_review`/`no_candidate` results and failed lookups are reported in a timestamped CSV under `data/reports/`. Open that report in a spreadsheet to inspect candidate IDs, labels, descriptions, and available aliases or book author IDs. Successful Wikidata entity IDs are stored for future runs, so accepted matches do not need to be searched by name again. Lookup errors do not erase previously stored facts.
+Each run writes a timestamped report under `data/reports/`. Accepted matches are omitted; unresolved/skipped rows and errors remain. Open the report to inspect candidate IDs, labels, descriptions, aliases, and book author IDs.
 
-For author or book candidates that need review, run:
+For a second pass, `needs_review` and `book_summary: ambiguous` rows use the candidates saved in the report. `no_candidate` and `error` rows have no saved choices, so their lookup is retried. Run:
 
 ```powershell
-uv run python src/enrich/wikidata_enrich.py --interactive
+uv run python src/enrich/wikidata_enrich.py --from-report data/reports/enrichment_review_<timestamp>.csv --interactive
 ```
 
-The prompt lists candidate IDs, labels, descriptions, and available English aliases; book candidates also show their Wikidata author IDs when present. Enter a candidate number to accept it, or press Enter to skip. The selection must belong to the current candidate list and be revalidated before it is saved: authors must be humans, and books must pass the book type and known-author checks. Accepted IDs are reused on later runs; skipped candidates remain in the review CSV. Without `--interactive`, the script never prompts and still writes the report. `no_candidate` means only that the attempted search found no suitable candidates; it does not prove that an entry is absent from Wikidata.
+Choose one or more `--entity-type` values (`author`, `book`, `book_summary`); repeat the option to select multiple types. Choose one or more `--status` values for Wikidata and/or `--summary-status` values for Open Library. Use `--author "Exact Graph Name"` or `--book-id 0001` to target specific records. Repeat an option to include multiple values. `--interactive` prompts for Wikidata `needs_review` candidates and Open Library `book_summary: ambiguous` candidates. Press Enter to skip. Skipped items remain unresolved in the next report. Candidate IDs are revalidated before persistence: authors must be humans, books must pass the supported book-type and known-author checks, and Open Library choices must still match the current title-and-author search.
 
-Wikidata P27 is country of citizenship, which is not necessarily nationality; the graph relationship is named `CITIZEN_OF`. Gender and genre are represented as nodes. Wikidata book statuses are separate from Open Library summary lookup. If no summary is stored, Open Library is tried as a secondary source, and a description is stored only after a unique exact title-and-author match. The source is recorded on the Book.
+A prior report can also be filtered in the same command, for example:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --from-report data/reports/enrichment_review_<timestamp>.csv --entity-type book_summary --summary-status ambiguous --interactive
+```
+
+If you found a Wikidata item manually for a `no_candidate` row, pass its QID for validation and storage:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --manual-book-qid "0001=Q123"
+uv run python src/enrich/wikidata_enrich.py --manual-author-qid "Author Name=Q456"
+```
+
+The script validates that manually supplied IDs resolve to the right entity type (and checks known book authors). A stored QID is re-used by normal runs. To search for a replacement, use `--interactive --entity-type book --book-id 0001 --rematch-book-id 0001` or the author equivalents; skipping keeps the existing match. `--refresh` does not rematch.
+
+Wikidata P27 is country of citizenship, which is not necessarily nationality; the graph relationship is named `CITIZEN_OF`. Gender and genre are represented as nodes. Open Library summary status is separate from Wikidata status. A unique exact title-and-author work is accepted automatically; ambiguous exact matches can be selected interactively. The source of any stored summary is recorded on the Book.
+
+### Correcting or Resetting Enrichment
+
+#### Replace a Wikidata match
+
+Use the enrichment CLI for identity changes. If you skip the prompt, the old ID and its facts remain. If you accept a replacement, the script removes the affected node's old Wikidata-derived links before applying the replacement. It preserves CSV-owned fields, `Book.title`, and Open Library summaries.
+
+For a book rematch:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --interactive --entity-type book --book-id 0130 --rematch-book-id 0130
+```
+
+For an author rematch:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --interactive --entity-type author --author "AUTHOR NAME" --rematch-author "AUTHOR NAME"
+```
+
+#### Reset a match manually
+
+Use Cypher only when you intend to change graph state manually. Run parameterized statements in Neo4j Query after setting `$name` or `$book_id` to the exact graph key. To remove an author's Wikidata-derived relationships:
+
+```cypher
+MATCH (a:Author {name: $name})-[r:HAS_GENDER|CITIZEN_OF]->()
+DELETE r;
+```
+
+Then clear the stored match:
+
+```cypher
+MATCH (a:Author {name: $name})
+REMOVE a.wikidata_id, a.wikidata_status, a.wikidata_checked_at;
+```
+
+To remove a book's Wikidata-derived genre relationships:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})-[r:HAS_GENRE]->()
+DELETE r;
+```
+
+Then clear the stored match while preserving an Open Library-sourced publication year:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})
+FOREACH (_ IN CASE WHEN b.publication_year_source = 'wikidata' THEN [1] ELSE [] END |
+  REMOVE b.publication_year, b.publication_year_source)
+REMOVE b.wikidata_id, b.wikidata_status, b.wikidata_checked_at;
+```
+
+Then rerun the corresponding rematch command above.
+
+#### Remove one incorrect genre relationship
+
+To delete one incorrect genre link while keeping the book's valid Wikidata match, remove only that relationship:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})-[r:HAS_GENRE]->(g:Genre {name: $genre_name})
+DELETE r;
+```
+
+Do not rerun enrichment for that book unless you want Wikidata to rebuild its genre links; refreshing the stored match may re-add this relationship.
+
+#### Refresh facts from the same Wikidata match
+
+To refresh facts without searching for a replacement, keep the stored `wikidata_id` and clear only the checked timestamp. The targeted command reuses that QID, refetches its claims, and rebuilds its Wikidata-derived relationships.
+
+For an author, clear the timestamp:
+
+```cypher
+MATCH (a:Author {name: $name})
+REMOVE a.wikidata_checked_at;
+```
+
+Then target that author:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --entity-type author --author "AUTHOR NAME"
+```
+
+For a book, clear the timestamp:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})
+REMOVE b.wikidata_checked_at;
+```
+
+Then target that book:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --entity-type book --book-id 0001
+```
+
+`--refresh` is the all-record version of this refresh.
+
+For a manually verified Wikidata entity, prefer the validated CLI options:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --manual-book-qid "0130=Q12345"
+uv run python src/enrich/wikidata_enrich.py --manual-author-qid "AUTHOR NAME=Q67890"
+```
+
+The script verifies the QID resolves to the required entity type and checks known book authors. For a manually verified genre fact, a parameterized `MERGE` is additive:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})
+MERGE (g:Genre {name: $genre_name})
+ON CREATE SET g.wikidata_id = $genre_qid
+MERGE (b)-[:HAS_GENRE]->(g);
+```
+
+Do not delete shared `Genre`, `Gender`, or `Country` nodes when correcting one entity; delete only the affected relationship.
+
+To remove one incorrect author fact while keeping the existing Wikidata ID, delete only that relationship and do not rerun Wikidata enrichment unless you intend it to be re-added:
+
+```cypher
+MATCH (a:Author {name: $name})-[r:HAS_GENDER]->(g:Gender {name: $gender_name})
+DELETE r;
+```
+
+To discard only a bad Open Library summary/work choice and search again, remove its summary state. This does not change Wikidata status or ID:
+
+```cypher
+MATCH (b:Book {book_id: $book_id})
+REMOVE b.openlibrary_id, b.summary, b.summary_source,
+	   b.openlibrary_status, b.openlibrary_checked_at;
+```
+
+Then target that summary lookup:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --entity-type book_summary --book-id 0001 --interactive
+```
 
 ## 7. Explore the Graph
 
@@ -198,7 +364,15 @@ Run query 8 to return `Book.title` alongside `Read.title_read`, language, and re
 
 ### Use Case: View the Graph
 
-To display a small graph, run this in Query and select the **Graph** results view:
+To display the full connected graph in Query, run this and select the **Graph** results view:
+
+```cypher
+MATCH (n)
+OPTIONAL MATCH (n)-[r]->(m)
+RETURN n, r, m;
+```
+
+For a smaller preview, return a limited set of reading paths:
 
 ```cypher
 MATCH p = (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)

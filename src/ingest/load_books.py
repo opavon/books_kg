@@ -26,13 +26,10 @@ BATCH_SIZE = 100
 UPSERT_QUERY = """
 UNWIND $rows AS row
 MERGE (b:Book {book_id: row.book_id})
-ON CREATE SET b.title = row.title
-ON MATCH SET b.title = row.title
+SET b.title = row.title
 MERGE (r:Read {book_id: row.book_id})
-ON CREATE SET r.date = date(row.date), r.score = row.score,
-              r.title_read = row.title_read, r.language_read = row.language_read
-ON MATCH SET r.date = date(row.date), r.score = row.score,
-             r.title_read = row.title_read, r.language_read = row.language_read
+SET r.date = date(row.date), r.score = row.score,
+    r.title_read = row.title_read, r.language_read = row.language_read
 MERGE (r)-[:OF_BOOK]->(b)
 WITH row, b
 UNWIND row.authors AS author_name
@@ -81,72 +78,76 @@ def load_rows(csv_path: Path) -> list[dict]:
     rows = []
     seen_ids = set()
     with csv_path.open(newline="", encoding="utf-8-sig") as source:
-        reader = csv.DictReader(source)
-        if reader.fieldnames is None:
-            raise ValueError("CSV is empty or missing its header row")
-        if len(reader.fieldnames) != len(set(reader.fieldnames)):
-            raise ValueError("CSV contains duplicate column headers")
-        missing = REQUIRED_COLUMNS - set(reader.fieldnames)
-        if missing:
-            raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
+        reader = csv.DictReader(source, strict=True)
+        try:
+            if reader.fieldnames is None:
+                raise ValueError("CSV is empty or missing its header row")
+            if len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise ValueError("CSV contains duplicate column headers")
+            missing = REQUIRED_COLUMNS - set(reader.fieldnames)
+            if missing:
+                raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
 
-        for line_number, raw in enumerate(reader, start=2):
-            row_errors = []
-            book_id = (raw.get("book_id") or "").strip()
-            title = (raw.get("title") or "").strip()
-            title_read = (raw.get("title_read") or "").strip()
-            language_read = (raw.get("language_read") or "").strip()
-            author_text = raw.get("author") or ""
-            if None in raw:
-                row_errors.append("too many CSV fields")
-            if not book_id:
-                row_errors.append("book_id is blank")
-            elif book_id in seen_ids:
-                row_errors.append(f"duplicate book_id {book_id!r}")
-            else:
-                seen_ids.add(book_id)
-            if not title:
-                row_errors.append("title is blank")
-            if not title_read:
-                row_errors.append("title_read is blank")
-            if not language_read:
-                row_errors.append("language_read is blank")
-            try:
-                authors = normalize_author(author_text)
-            except ValueError as exc:
-                row_errors.append(str(exc))
-                authors = []
-            try:
-                date_value = to_neo4j_date(raw.get("year_month") or "")
-            except ValueError as exc:
-                row_errors.append(f"year_month {exc}")
-                date_value = ""
-            score_text = (raw.get("score") or "").strip()
-            try:
-                score_decimal = Decimal(score_text)
-                if not score_decimal.is_finite():
-                    raise InvalidOperation
-                score = float(score_decimal)
-                if not math.isfinite(score):
-                    raise InvalidOperation
-            except (InvalidOperation, ValueError, OverflowError):
-                row_errors.append("score must be a finite number")
-                score = 0.0
+            for raw in reader:
+                line_number = reader.line_num
+                row_errors = []
+                book_id = (raw.get("book_id") or "").strip()
+                title = (raw.get("title") or "").strip()
+                title_read = (raw.get("title_read") or "").strip()
+                language_read = (raw.get("language_read") or "").strip()
+                author_text = raw.get("author") or ""
+                if None in raw:
+                    row_errors.append("too many CSV fields")
+                if not book_id:
+                    row_errors.append("book_id is blank")
+                elif book_id in seen_ids:
+                    row_errors.append(f"duplicate book_id {book_id!r}")
+                else:
+                    seen_ids.add(book_id)
+                if not title:
+                    row_errors.append("title is blank")
+                if not title_read:
+                    row_errors.append("title_read is blank")
+                if not language_read:
+                    row_errors.append("language_read is blank")
+                try:
+                    authors = normalize_author(author_text)
+                except ValueError as exc:
+                    row_errors.append(str(exc))
+                    authors = []
+                try:
+                    date_value = to_neo4j_date(raw.get("year_month") or "")
+                except ValueError as exc:
+                    row_errors.append(f"year_month {exc}")
+                    date_value = ""
+                score_text = (raw.get("score") or "").strip()
+                try:
+                    score_decimal = Decimal(score_text)
+                    if not score_decimal.is_finite():
+                        raise InvalidOperation
+                    score = float(score_decimal)
+                    if not math.isfinite(score):
+                        raise InvalidOperation
+                except (InvalidOperation, ValueError, OverflowError):
+                    row_errors.append("score must be a finite number")
+                    score = 0.0
 
-            if row_errors:
-                errors.append(f"line {line_number}: {'; '.join(row_errors)}")
-            else:
-                rows.append(
-                    {
-                        "book_id": book_id,
-                        "title": title,
-                        "title_read": title_read,
-                        "language_read": language_read,
-                        "authors": authors,
-                        "date": date_value,
-                        "score": score,
-                    }
-                )
+                if row_errors:
+                    errors.append(f"line {line_number}: {'; '.join(row_errors)}")
+                else:
+                    rows.append(
+                        {
+                            "book_id": book_id,
+                            "title": title,
+                            "title_read": title_read,
+                            "language_read": language_read,
+                            "authors": authors,
+                            "date": date_value,
+                            "score": score,
+                        }
+                    )
+        except csv.Error as exc:
+            raise ValueError(f"Malformed CSV near line {reader.line_num + 1}: {exc}") from exc
 
     if errors:
         raise ValueError("Invalid CSV rows; no data was written:\n" + "\n".join(errors))
