@@ -2,6 +2,34 @@
 
 This guide starts from a fresh computer/database setup and walks through updating the graph from the one cumulative CSV, enriching it, and exploring the results. Commands below are for PowerShell, opened at the repository root (`books_kg`).
 
+## Contents
+
+- [Books KG User Guide](#books-kg-user-guide)
+  - [Contents](#contents)
+  - [What You Are Running](#what-you-are-running)
+  - [1. Start Neo4j](#1-start-neo4j)
+  - [2. Prepare Python and Credentials](#2-prepare-python-and-credentials)
+  - [3. Apply the Graph Schema](#3-apply-the-graph-schema)
+    - [Optional: Use Cypher Shell](#optional-use-cypher-shell)
+  - [4. Maintain the Cumulative CSV](#4-maintain-the-cumulative-csv)
+  - [5. Update the Graph from the CSV](#5-update-the-graph-from-the-csv)
+  - [6. Enrich the Graph](#6-enrich-the-graph)
+    - [Correcting or Resetting Enrichment](#correcting-or-resetting-enrichment)
+      - [Replace a Wikidata match](#replace-a-wikidata-match)
+      - [Reset a match manually](#reset-a-match-manually)
+      - [Remove one incorrect genre relationship](#remove-one-incorrect-genre-relationship)
+      - [Refresh facts from the same Wikidata match](#refresh-facts-from-the-same-wikidata-match)
+  - [7. Explore the Graph](#7-explore-the-graph)
+    - [Use Case: Find Authors You Read Often](#use-case-find-authors-you-read-often)
+    - [Use Case: Compare Scores by Month or Season](#use-case-compare-scores-by-month-or-season)
+    - [Use Case: See What You Read Around a Book](#use-case-see-what-you-read-around-a-book)
+    - [Use Case: Discover Authors with Shared Genres](#use-case-discover-authors-with-shared-genres)
+    - [Use Case: Explore Gender and Citizenship Coverage](#use-case-explore-gender-and-citizenship-coverage)
+    - [Use Case: Count Books by Reading Language](#use-case-count-books-by-reading-language)
+    - [Use Case: Compare Canonical and Read Titles](#use-case-compare-canonical-and-read-titles)
+    - [Use Case: View the Graph](#use-case-view-the-graph)
+  - [Troubleshooting](#troubleshooting)
+
 ## What You Are Running
 
 The knowledge graph stores information as nodes and relationships. A `Book` node represents a book in your list, an `Author` node represents an author, and a `Read` node stores when you finished the book and your score. `WROTE`, `OF_BOOK`, and other relationships connect those facts.
@@ -11,7 +39,7 @@ The CSV is the source of truth for books you have read. Wikidata supplies option
 ## 1. Start Neo4j
 
 1. Install [Neo4j Desktop](https://neo4j.com/download/) if it is not already installed.
-2. In Neo4j Desktop, create a local DBMS (database management system). Go to `Data services > Local instances > Create instance`. Choose a Neo4j version, set a password for the `neo4j` user, and start the DBMS. Neo4j Desktop's labels can vary by version; look for the local DBMS/instance area.
+2. In Neo4j Desktop, create a local DBMS (database management system). Go to `Data services > Instances > Create instance`. Choose a Neo4j version, set a password for the `neo4j` user, and start the DBMS. Neo4j Desktop's labels can vary by version; look for the local DBMS/instance area.
 3. Use the default `neo4j` database for this project. Record the Bolt URI (commonly `bolt://localhost:7687`), username (`neo4j`), and the password you just set. The scripts do not create a DBMS or database.
 
 Use that same DBMS and database for the schema, ingestion, enrichment, and queries. Do not use your Neo4j website sign-in as the database password.
@@ -54,7 +82,7 @@ The easiest option to implement the schema is Neo4j Desktop's Query tool:
 2. In VSCode, open `schema/constraints.cypher` in VS Code.
 3. Copy and run the complete file. Its `//` lines are comments and can remain.
 
-Apply the constraints once, before the first import. They use `IF NOT EXISTS`, so they are safe to reapply; routine CSV updates do not need this step. No `DROP` statement or migration is needed for a new database.
+Apply the constraints once, before the first import. They use `IF NOT EXISTS`, so they are safe to reapply; routine CSV updates do not need this step.
 
 ### Optional: Use Cypher Shell
 
@@ -334,13 +362,13 @@ uv run python src/enrich/wikidata_enrich.py --entity-type book_summary --book-id
 
 Open **Query** for the same running database in Neo4j Desktop. Open `src/queries/analytics.cypher`, then copy and run one query at a time. Neo4j Browser/Query supports the Cypher statements directly. Queries 1, 2, and 5–8 do not need parameters. Query 4 needs genre enrichment to have returned usable genre matches.
 
-### Use Case: Compare Scores by Month or Season
-
-Run query 2. The first part groups reading scores by calendar month; the second groups them into winter, spring, summer, and fall. Each result includes the number of books in that group, so you can see how much data supports the average.
-
 ### Use Case: Find Authors You Read Often
 
 Run query 1. It lists authors with more than three linked books and compares their average score to the overall average. The `diffFromOverall` column shows whether your average score for that author is above or below your overall score.
+
+### Use Case: Compare Scores by Month or Season
+
+Run query 2. The first part groups reading scores by calendar month; the second groups them into winter, spring, summer, and fall. Each result includes the number of books in that group, so you can see how much data supports the average.
 
 ### Use Case: See What You Read Around a Book
 

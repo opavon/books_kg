@@ -2,6 +2,17 @@
 
 A personal Neo4j knowledge graph of books read, reading dates and scores, authors, genres, and selected author attributes.
 
+## Contents
+
+- [Books KG](#books-kg)
+  - [Contents](#contents)
+  - [Data model](#data-model)
+  - [Setup](#setup)
+  - [Cumulative CSV](#cumulative-csv)
+  - [Wikidata enrichment](#wikidata-enrichment)
+  - [Rerun order](#rerun-order)
+  - [Roadmap](#roadmap)
+
 ## Data model
 
 ```mermaid
@@ -17,6 +28,8 @@ graph LR
 
 ## Setup
 
+See the [user guide](docs/user-guide.md) for detailed instructions.
+
 1. Install [Neo4j Desktop](https://neo4j.com/download/) and create and start a local DBMS. Use the `neo4j` database.
 2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/). On Windows, use PowerShell:
 
@@ -31,15 +44,11 @@ graph LR
 
 ## Cumulative CSV
 
-Maintain one append-only CSV selected by `BOOKS_CSV_PATH`. Its headers are:
+Maintain one append-only CSV selected by `BOOKS_CSV_PATH`. See the [user guide](docs/user-guide.md) for full details. Its headers are:
 
 ```text
 book_id,title,title_read,language_read,author,year_month,score
 ```
-
-Keep `book_id` stable and unique, including leading zeros. Each book appears once. Use `YYYY_MM` for `year_month`; the day is set to `01`. Scores must be finite numbers and may be decimal. Separate authors with `/`; the loader trims each name and creates a separate author relationship. `title_read` and `language_read` are required and must be nonblank; surrounding whitespace is trimmed. They are stored on `Read`, while `Book.title` remains the canonical title.
-
-Escape literal quotes inside quoted CSV fields by doubling them (`""`). The loader rejects malformed quoting and reports its line number.
 
 The loader validates the entire CSV before connecting to Neo4j. From the project root, run:
 
@@ -57,7 +66,7 @@ Run after ingestion:
 uv run python src/enrich/wikidata_enrich.py
 ```
 
-Wikidata automatically accepts unique exact-label candidates after entity validation; book matches also check known authors. The normal run processes new, unresolved, and stale records. `--interactive` prompts for review candidates; `--refresh` updates facts for stored Wikidata IDs but does not rematch. Open Library summaries have independent status and refresh behavior. The [user guide](docs/user-guide.md) is the canonical reference for statuses, report replay, targeted filters, manual QIDs, rematches, and resets. `WIKIDATA_USER_AGENT` can be set in `.env`.
+Wikidata automatically accepts unique exact-label candidates after entity validation; book matches also check known authors. The normal run processes new, unresolved, and stale records. `--interactive` prompts for review candidates; `--refresh` updates facts for stored Wikidata IDs but does not rematch. Open Library summaries have independent status and refresh behavior. The [user guide](docs/user-guide.md) is the canonical reference for statuses, report replay, targeted filters, manual QIDs, rematches, and resets.
 
 ## Rerun order
 
@@ -67,18 +76,12 @@ After the initial setup, for each update to the cumulative CSV:
 2. Run `uv run python src/enrich/wikidata_enrich.py` and review `data/reports/`.
 3. Run the desired queries from `src/queries/analytics.cypher`.
 
-Query 3 takes `$book_id`; query 4 requires genre data. Gender and citizenship analytics include only classified authors; a multi-author book may contribute to multiple categories.
-
 To visualize the graph in Neo4j Browser, run a query that returns a path:
 
 ```cypher
 MATCH p = (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
-RETURN p
-LIMIT 25;
+RETURN p;
 ```
-
-For language counts and reading-title comparisons, run queries 7 and 8 in
-`src/queries/analytics.cypher`.
 
 ## Roadmap
 
