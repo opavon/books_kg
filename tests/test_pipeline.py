@@ -938,7 +938,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(author["wikidata_id"], "Q1")
 
     def test_manual_qid_for_missing_target_fails_clearly(self):
-        with self.assertRaisesRegex(ValueError, "Book target\(s\) not found: 0001"):
+        with self.assertRaisesRegex(ValueError, r"Book target\(s\) not found: 0001"):
             run_enrichment(
                 TargetedEnrichmentSession(),
                 FakeWikidataClient([], {}),
@@ -1415,6 +1415,60 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual(counts["summaries_checked"], 1)
         self.assertEqual(len(reviews), 1)
+
+    def test_summary_error_retries_even_when_a_cached_summary_exists(self):
+        open_library = OpenLibraryClient(
+            FakeOpenLibraryHttp(
+                [
+                    {
+                        "docs": [
+                            {
+                                "key": "/works/OL2W",
+                                "title": "Title",
+                                "author_name": ["Author"],
+                                "first_publish_year": 2002,
+                            }
+                        ]
+                    },
+                    {"description": {"value": "Updated summary."}},
+                ]
+            )
+        )
+        session = SummaryFilteringSession(
+            summaries=[
+                {
+                    "book_id": "0001",
+                    "title": "Title",
+                    "authors": ["Author"],
+                    "summary": "Cached summary.",
+                    "openlibrary_id": "/works/OL1W",
+                    "openlibrary_status": "error",
+                }
+            ]
+        )
+
+        counts, reviews = run_enrichment(
+            session,
+            FakeWikidataClient([], {}),
+            open_library,
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            entity_types={"book_summary"},
+            summary_statuses=["error"],
+            summary_book_ids=["0001"],
+        )
+
+        self.assertEqual(len(open_library.http.urls), 2)
+        self.assertEqual(counts["summary_matched"], 1)
+        self.assertEqual(reviews, [])
+        parameters = next(
+            parameters
+            for _, parameters in session.transaction.calls
+            if "summary" in parameters
+        )
+        self.assertEqual(parameters["summary"], "Updated summary.")
+        self.assertEqual(parameters["openlibrary_id"], "/works/OL2W")
 
     def test_first_pass_summary_selection_searches_once_then_fetches_work(self):
         http = FakeOpenLibraryHttp(

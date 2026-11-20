@@ -35,6 +35,7 @@ See the [user guide](docs/user-guide.md) for detailed instructions.
 
     ```powershell
     winget install --id=astral-sh.uv -e
+    uv python install 3.14.3
     uv sync
     Copy-Item .env.example .env
     ```

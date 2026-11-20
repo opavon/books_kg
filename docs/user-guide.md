@@ -15,6 +15,7 @@ This guide starts from a fresh computer/database setup and walks through updatin
   - [5. Update the Graph from the CSV](#5-update-the-graph-from-the-csv)
   - [6. Enrich the Graph](#6-enrich-the-graph)
     - [Correcting or Resetting Enrichment](#correcting-or-resetting-enrichment)
+      - [Correct a CSV author name](#correct-a-csv-author-name)
       - [Replace a Wikidata match](#replace-a-wikidata-match)
       - [Reset a match manually](#reset-a-match-manually)
       - [Remove one incorrect genre relationship](#remove-one-incorrect-genre-relationship)
@@ -124,7 +125,7 @@ Follow these rules:
 - Use a consistent language code or label (for example, `en`) so language counts group as expected.
 - Escape literal double quotes inside a quoted CSV field by doubling them (`""`). The loader rejects malformed quoting and reports the CSV line number.
 
-Do not edit already-loaded rows as part of the normal workflow. The file is intended to be append-only. If an existing book's details or ID need correction, pause and handle it deliberately rather than assigning that book a new ID.
+The normal workflow is append-only. If an existing row needs correction, keep its `book_id` and reload the cumulative CSV rather than assigning a new ID. The loader adds `WROTE` relationships for the CSV's current authors, but it does not remove relationships to old author names or delete stale author nodes. See [Correct a CSV author name](#correct-a-csv-author-name) for the cleanup steps.
 
 ## 5. Update the Graph from the CSV
 
@@ -134,7 +135,7 @@ Make sure Neo4j is running and `.env` points to the correct database. From the r
 uv run python src/ingest/load_books.py
 ```
 
-or, if already on a terminal with the activated uv environment, run"
+or, if already on a terminal with the activated uv environment, run:
 
 ```powershell
 python src/ingest/load_books.py
@@ -142,10 +143,7 @@ python src/ingest/load_books.py
 
 The loader validates the entire CSV before it writes anything. If it reports invalid rows, correct the CSV and rerun; it will not load only the valid subset. On success it reports inserted, updated, and unchanged rows. Rerunning the same cumulative file is safe: existing `Book` and `Read` nodes are matched by `book_id`, and authors and relationships are merged rather than duplicated.
 
-Apply the constraints once before the first import, as described above. Start with a fresh database: the loader does not migrate data from an older title-keyed graph.
-The CSV already contains a stable `book_id` for every row, so the loader does
-not migrate data from an older title-keyed graph. Slash-separated authors in
-the CSV are normalized into separate Author nodes and `WROTE` relationships.
+Apply the constraints once before the first import, as described above. If you are migrating a graph created by an older title-keyed loader, use a fresh database; this loader does not migrate that graph. Slash-separated CSV authors are normalized into separate `Author` nodes and `WROTE` relationships.
 
 ## 6. Enrich the Graph
 
@@ -163,7 +161,7 @@ Wikidata statuses and actions:
 | --- | --- | --- |
 | `matched` | One unique exact candidate was accepted, automatically or by review. | Normally skipped until stale; `--refresh` refreshes facts for its stored QID. |
 | `needs_review` | Suitable candidates exist but no unique exact match was found. | Use `--interactive` or replay the report with `--from-report`. |
-| `no_candidate` | The bounded search returned no suitable candidate; this does not prove absence. | Retry normally later, correct the source title/name if needed, or supply a manually verified QID. There is nothing to choose interactively. |
+| `no_candidate` | The bounded search returned no suitable candidate; this does not prove absence. | Retry later, correct the source title/name if needed, or supply a manually verified QID. A later search may find candidates to review. |
 | `error` | The external lookup failed. | A normal run retries it; persistent errors remain report rows. |
 
 Open Library summary statuses are separate from Wikidata:
@@ -225,6 +223,39 @@ The script validates that manually supplied IDs resolve to the right entity type
 Wikidata P27 is country of citizenship, which is not necessarily nationality; the graph relationship is named `CITIZEN_OF`. Gender and genre are represented as nodes. Open Library summary status is separate from Wikidata status. A unique exact title-and-author work is accepted automatically; ambiguous exact matches can be selected interactively. The source of any stored summary is recorded on the Book.
 
 ### Correcting or Resetting Enrichment
+
+#### Correct a CSV author name
+
+If an author name in an already-loaded CSV row was an alias or typo, correct the `author` field without changing the row's `book_id`, then reload the cumulative CSV. Confirm that the new author is connected to the expected book:
+
+```cypher
+MATCH (a:Author {name: $new_name})-[:WROTE]->(b:Book {book_id: $book_id})
+RETURN a.name, b.title;
+```
+
+Inspect the old author's remaining books before removing the stale relationship:
+
+```cypher
+MATCH (a:Author {name: $old_name})-[:WROTE]->(b:Book)
+RETURN a.name, collect({book_id: b.book_id, title: b.title}) AS books;
+```
+
+If only the corrected book was attached to the old name, remove that relationship and delete the old node only if no `WROTE` relationships remain. `DETACH DELETE` also removes the old node's enrichment relationships:
+
+```cypher
+MATCH (a:Author {name: $old_name})-[r:WROTE]->(:Book {book_id: $book_id})
+DELETE r;
+
+MATCH (a:Author {name: $old_name})
+WHERE NOT (a)-[:WROTE]->()
+DETACH DELETE a;
+```
+
+Then enrich the corrected author by exact graph name:
+
+```powershell
+uv run python src/enrich/wikidata_enrich.py --entity-type author --author "NEW AUTHOR NAME" --interactive
+```
 
 #### Replace a Wikidata match
 

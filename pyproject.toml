@@ -1,7 +1,7 @@
 [project]
 name = "books-kg"
 version = "0.1.0"
-description = "Add your description here"
+description = "A personal Neo4j knowledge graph of books, reading history, and enrichment data."
 readme = "README.md"
 requires-python = ">=3.14.3"
 dependencies = [

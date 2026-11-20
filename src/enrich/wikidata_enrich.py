@@ -1004,9 +1004,10 @@ def run_enrichment(
    for index, book in enumerate(summaries, start=1):
       key = book["book_id"]
       title = book["title"]
-      if not refresh_summaries and (
-         book.get("summary")
-         or (book.get("openlibrary_id") and book.get("openlibrary_status") == "matched")
+      if (
+         not refresh_summaries
+         and book.get("openlibrary_status") == "matched"
+         and (book.get("summary") or book.get("openlibrary_id"))
       ):
          continue
       authors = [name for name in (book["authors"] or []) if name]
