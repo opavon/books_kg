@@ -1,87 +1,214 @@
-"""
-Load books.csv into Neo4j.
+"""Validate and idempotently load the cumulative books CSV into Neo4j."""
 
-Expects a CSV in data/raw with columns: title, author, year_month, score
-  - year_month formatted like "2023_06"
-  - score numeric (e.g. 1-5 or 1-10, whatever scale you used)
-
-Usage:
-        python src/ingest/load_books.py [csv_filename]
-"""
-
-import argparse
 import csv
+import math
 import os
+import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REQUIRED_COLUMNS = {
+    "book_id",
+    "title",
+    "title_read",
+    "language_read",
+    "author",
+    "year_month",
+    "score",
+}
+BATCH_SIZE = 100
 
-NEO4J_URI = os.environ["NEO4J_URI"]
-NEO4J_USER = os.environ["NEO4J_USER"]
-NEO4J_PASSWORD = os.environ["NEO4J_PASSWORD"]
-
-RAW_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "raw"
-
-LOAD_QUERY = """
-MERGE (a:Author {name: $author})
-MERGE (b:Book {title: $title})
+UPSERT_QUERY = """
+UNWIND $rows AS row
+MERGE (b:Book {book_id: row.book_id})
+SET b.title = row.title
+MERGE (r:Read {book_id: row.book_id})
+SET r.date = date(row.date), r.score = row.score,
+    r.title_read = row.title_read, r.language_read = row.language_read
+MERGE (r)-[:OF_BOOK]->(b)
+WITH row, b
+UNWIND row.authors AS author_name
+MERGE (a:Author {name: author_name})
 MERGE (a)-[:WROTE]->(b)
-CREATE (r:Read {date: date($date), score: toInteger($score)})
-CREATE (r)-[:OF_BOOK]->(b)
+"""
+
+EXISTING_QUERY = """
+UNWIND $book_ids AS book_id
+OPTIONAL MATCH (b:Book {book_id: book_id})
+OPTIONAL MATCH (r:Read {book_id: book_id})
+OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
+RETURN book_id, b.title AS title, r.date AS date, r.score AS score,
+       r.title_read AS title_read, r.language_read AS language_read,
+       collect(DISTINCT a.name) AS authors
 """
 
 
-def normalize_author(name: str) -> str:
-    """Basic cleanup - expand this as you find inconsistencies in your data.
-    e.g. collapse 'Tolkien, J.R.R.' vs 'J.R.R. Tolkien' to one form."""
-    return name.strip()
+def resolve_source_csv(configured_path: str | None) -> Path:
+    if configured_path is None or not configured_path.strip():
+        raise ValueError("BOOKS_CSV_PATH must be set in .env to the cumulative CSV file")
+    csv_path = Path(configured_path).expanduser()
+    return csv_path if csv_path.is_absolute() else PROJECT_ROOT / csv_path
+
+
+def normalize_author(name: str) -> list[str]:
+    authors = [part.strip() for part in name.split("/")]
+    if not name.strip() or any(not author for author in authors):
+        raise ValueError("author must contain one or more nonblank names separated by '/'")
+    return list(dict.fromkeys(authors))
 
 
 def to_neo4j_date(year_month: str) -> str:
-    """'2023_06' -> '2023_06_01' (Neo4j date() needs a full date)."""
-    year, month = year_month.strip().split("_")
-    return f"{year}-{month}-01"
-
-
-def load_rows(csv_path: Path):
-    with open(csv_path, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        rows = []
-        for row in reader:
-            rows.append(
-                {
-                    "title": row["title"].strip(),
-                    "author": normalize_author(row["author"]),
-                    "date": to_neo4j_date(row["year_month"]),
-                    "score": row["score"].strip(),
-                }
-            )
-        return rows
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Load a books CSV from data/raw into Neo4j.")
-    parser.add_argument(
-        "csv_filename",
-        nargs="?",
-        default="books.csv",
-        help="CSV filename inside data/raw (default: books.csv)",
-    )
-    args = parser.parse_args()
-    csv_path = RAW_DATA_DIR / args.csv_filename
-
-    rows = load_rows(csv_path)
-    print(f"Loaded {len(rows)} rows from {csv_path}")
-
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    match = re.fullmatch(r"(\d{4})_(\d{2})", year_month.strip())
+    if match is None:
+        raise ValueError("must use YYYY_MM format")
+    year, month = map(int, match.groups())
     try:
-        with driver.session() as session:
-            for row in rows:
-                session.run(LOAD_QUERY, **row)
-        print("Done. Rows written to Neo4j.")
+        return date(year, month, 1).isoformat()
+    except ValueError as exc:
+        raise ValueError("contains an invalid year or month") from exc
+
+
+def load_rows(csv_path: Path) -> list[dict]:
+    errors = []
+    rows = []
+    seen_ids = set()
+    with csv_path.open(newline="", encoding="utf-8-sig") as source:
+        reader = csv.DictReader(source, strict=True)
+        try:
+            if reader.fieldnames is None:
+                raise ValueError("CSV is empty or missing its header row")
+            if len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise ValueError("CSV contains duplicate column headers")
+            missing = REQUIRED_COLUMNS - set(reader.fieldnames)
+            if missing:
+                raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")
+
+            for raw in reader:
+                line_number = reader.line_num
+                row_errors = []
+                book_id = (raw.get("book_id") or "").strip()
+                title = (raw.get("title") or "").strip()
+                title_read = (raw.get("title_read") or "").strip()
+                language_read = (raw.get("language_read") or "").strip()
+                author_text = raw.get("author") or ""
+                if None in raw:
+                    row_errors.append("too many CSV fields")
+                if not book_id:
+                    row_errors.append("book_id is blank")
+                elif book_id in seen_ids:
+                    row_errors.append(f"duplicate book_id {book_id!r}")
+                else:
+                    seen_ids.add(book_id)
+                if not title:
+                    row_errors.append("title is blank")
+                if not title_read:
+                    row_errors.append("title_read is blank")
+                if not language_read:
+                    row_errors.append("language_read is blank")
+                try:
+                    authors = normalize_author(author_text)
+                except ValueError as exc:
+                    row_errors.append(str(exc))
+                    authors = []
+                try:
+                    date_value = to_neo4j_date(raw.get("year_month") or "")
+                except ValueError as exc:
+                    row_errors.append(f"year_month {exc}")
+                    date_value = ""
+                score_text = (raw.get("score") or "").strip()
+                try:
+                    score_decimal = Decimal(score_text)
+                    if not score_decimal.is_finite():
+                        raise InvalidOperation
+                    score = float(score_decimal)
+                    if not math.isfinite(score):
+                        raise InvalidOperation
+                except (InvalidOperation, ValueError, OverflowError):
+                    row_errors.append("score must be a finite number")
+                    score = 0.0
+
+                if row_errors:
+                    errors.append(f"line {line_number}: {'; '.join(row_errors)}")
+                else:
+                    rows.append(
+                        {
+                            "book_id": book_id,
+                            "title": title,
+                            "title_read": title_read,
+                            "language_read": language_read,
+                            "authors": authors,
+                            "date": date_value,
+                            "score": score,
+                        }
+                    )
+        except csv.Error as exc:
+            raise ValueError(f"Malformed CSV near line {reader.line_num + 1}: {exc}") from exc
+
+    if errors:
+        raise ValueError("Invalid CSV rows; no data was written:\n" + "\n".join(errors))
+    return rows
+
+
+def upsert_batch(tx, rows: list[dict]) -> dict:
+    existing = {
+        record["book_id"]: record
+        for record in tx.run(EXISTING_QUERY, book_ids=[row["book_id"] for row in rows])
+        if record["title"] is not None
+    }
+    counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+    for row in rows:
+        previous = existing.get(row["book_id"])
+        if previous is None:
+            counts["inserted"] += 1
+            continue
+        old_authors = set(previous["authors"])
+        if (
+            previous["title"] != row["title"]
+            or previous["date"].iso_format() != row["date"]
+            or float(previous["score"]) != row["score"]
+            or previous["title_read"] != row["title_read"]
+            or previous["language_read"] != row["language_read"]
+            or not set(row["authors"]).issubset(old_authors)
+        ):
+            counts["updated"] += 1
+        else:
+            counts["unchanged"] += 1
+
+    tx.run(UPSERT_QUERY, rows=rows).consume()
+    return counts
+
+
+def sync_rows(session, rows: list[dict]) -> dict:
+    totals = {"inserted": 0, "updated": 0, "unchanged": 0}
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch_counts = session.execute_write(upsert_batch, rows[start : start + BATCH_SIZE])
+        for key, value in batch_counts.items():
+            totals[key] += value
+    return totals
+
+
+def main() -> None:
+    load_dotenv()
+    source_csv = resolve_source_csv(os.getenv("BOOKS_CSV_PATH"))
+    rows = load_rows(source_csv)
+    print(f"Validated {len(rows)} rows from {source_csv}")
+
+    uri = os.environ["NEO4J_URI"]
+    user = os.environ["NEO4J_USER"]
+    password = os.environ["NEO4J_PASSWORD"]
+    database = os.getenv("NEO4J_DB_NAME") or None
+    driver = GraphDatabase.driver(uri, auth=(user, password))
+    try:
+        with driver.session(database=database) as session:
+            totals = sync_rows(session, rows)
+        print("Ingestion complete:")
+        for key, value in totals.items():
+            print(f"  {key}: {value}")
     finally:
         driver.close()
 

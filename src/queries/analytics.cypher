@@ -40,7 +40,7 @@ ORDER BY avgScore DESC;
 // 3. What did I read in the same period as book X?
 //    ("same period" = within 1 month either side; adjust as you like)
 // ---------------------------------------------------------------------
-MATCH (target:Book {title: $title})<-[:OF_BOOK]-(targetRead:Read)
+MATCH (target:Book {book_id: $book_id})<-[:OF_BOOK]-(targetRead:Read)
 MATCH (other:Book)<-[:OF_BOOK]-(r:Read)
 WHERE other <> target
   AND r.date >= targetRead.date - duration({months: 1})
@@ -67,6 +67,56 @@ RETURN other.name AS candidateAuthor,
        collect(DISTINCT g.name) AS sharedGenres,
        count(DISTINCT g) AS overlapCount
 ORDER BY overlapCount DESC;
+
+
+// ---------------------------------------------------------------------
+// 5. Read distribution and scores by known author gender.
+//    A multi-author book can contribute to multiple gender groups.
+// ---------------------------------------------------------------------
+MATCH (allRead:Read)
+WITH count(DISTINCT allRead) AS totalReads
+MATCH (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
+MATCH (a)-[:HAS_GENDER]->(g:Gender)
+RETURN g.name AS gender,
+       count(DISTINCT r) AS classifiedReads,
+       totalReads,
+       round(avg(r.score), 2) AS avgScore
+ORDER BY classifiedReads DESC;
+
+
+// ---------------------------------------------------------------------
+// 6. Read distribution and scores by known author citizenship.
+//    Citizenship is not necessarily the same as nationality.
+// ---------------------------------------------------------------------
+MATCH (allRead:Read)
+WITH count(DISTINCT allRead) AS totalReads
+MATCH (a:Author)-[:WROTE]->(b:Book)<-[:OF_BOOK]-(r:Read)
+MATCH (a)-[:CITIZEN_OF]->(c:Country)
+RETURN c.name AS citizenship,
+       count(DISTINCT r) AS classifiedReads,
+       totalReads,
+       round(avg(r.score), 2) AS avgScore
+ORDER BY classifiedReads DESC;
+
+
+// ---------------------------------------------------------------------
+// 7. How many books have I read in each language?
+// ---------------------------------------------------------------------
+MATCH (r:Read)
+RETURN r.language_read AS language,
+       count(DISTINCT r) AS booksRead
+ORDER BY booksRead DESC, language;
+
+
+// ---------------------------------------------------------------------
+// 8. Compare canonical titles with the titles as read
+// ---------------------------------------------------------------------
+MATCH (r:Read)-[:OF_BOOK]->(b:Book)
+RETURN b.title AS canonicalTitle,
+       r.title_read AS titleRead,
+       r.language_read AS languageRead,
+       r.date AS dateFinished
+ORDER BY canonicalTitle;
 
 // A stronger version later: Neo4j Graph Data Science `gds.nodeSimilarity`
 // over an Author-Genre bipartite projection, which scores similarity

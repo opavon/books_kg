@@ -4,6 +4,7 @@
 # raw personal data - keep out of version control
 data/raw/*
 !data/raw/.gitkeep
+data/reports/
 
 # python
 .venv/
