@@ -227,6 +227,21 @@ class TargetedEnrichmentSession:
         return callback(self.transaction, *arguments)
 
 
+class SummaryFilteringSession(TargetedEnrichmentSession):
+    def run(self, query, **parameters):
+        result = super().run(query, **parameters)
+        if query != DUE_SUMMARIES_QUERY:
+            return result
+        summaries = list(result)
+        selected_ids = parameters.get("summary_book_ids")
+        selected_statuses = parameters.get("summary_statuses")
+        if selected_ids is not None:
+            summaries = [item for item in summaries if item["book_id"] in selected_ids]
+        if selected_statuses is not None:
+            summaries = [item for item in summaries if item.get("openlibrary_status") in selected_statuses]
+        return FakeResult(summaries)
+
+
 class MatchedBookWikidataClient(FakeWikidataClient):
     def resolve(self, label, entity_type, known_id=None, related_author_ids=None):
         return "matched", "Q_BOOK", self.entity_data["Q_BOOK"], []
@@ -1342,10 +1357,12 @@ class PipelineTests(unittest.TestCase):
             book_ids=["0001"],
             summary_statuses=["ambiguous"],
             report_rows=[report_row],
+            summary_book_ids=["0001"],
         )
 
         summary_query = next(call for call in session.query_calls if call[0] == DUE_SUMMARIES_QUERY)
-        self.assertIsNone(summary_query[1]["summary_statuses"])
+        self.assertEqual(summary_query[1]["summary_book_ids"], ["0001"])
+        self.assertEqual(summary_query[1]["summary_statuses"], ["ambiguous"])
         query, parameters = session.transaction.calls[0]
         self.assertIn("openlibrary_status", query)
         self.assertEqual(parameters["openlibrary_id"], "/works/OL2W")
@@ -1353,6 +1370,51 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(parameters["publication_year"], 2002)
         self.assertEqual(counts["summary_matched"], 1)
         self.assertEqual(reviews, [])
+
+    def test_report_error_retries_only_the_selected_summary(self):
+        session = SummaryFilteringSession(
+            summaries=[
+                {"book_id": "0001", "title": "Selected error", "authors": [], "openlibrary_status": "error"},
+                {"book_id": "0002", "title": "Other error", "authors": [], "openlibrary_status": "error"},
+                {"book_id": "0003", "title": "Not found", "authors": [], "openlibrary_status": "not_found"},
+            ]
+        )
+        report_row = {
+            "type": "book_summary",
+            "key": "0001",
+            "label": "Selected error",
+            "status": "error",
+            "reason": "temporary network error",
+            "candidates": [],
+        }
+
+        counts, reviews = run_enrichment(
+            session,
+            FakeWikidataClient([], {}),
+            OpenLibraryClient(FakeOpenLibraryHttp([{"docs": []}])),
+            refresh=False,
+            stale_days=180,
+            limit=None,
+            entity_types={"book_summary"},
+            summary_statuses=["error"],
+            report_rows=[report_row],
+            summary_book_ids=["0001"],
+        )
+
+        summary_query = next(call for call in session.query_calls if call[0] == DUE_SUMMARIES_QUERY)
+        self.assertEqual(summary_query[1]["summary_book_ids"], ["0001"])
+        self.assertEqual(summary_query[1]["summary_statuses"], ["error"])
+        self.assertIn("AND ($summary_book_ids IS NULL OR b.book_id IN $summary_book_ids)", DUE_SUMMARIES_QUERY)
+        self.assertNotIn(
+            "AND ($force_selected OR $refresh_summaries OR $summary_book_ids IS NULL",
+            DUE_SUMMARIES_QUERY,
+        )
+        self.assertEqual(
+            [parameters["book_id"] for _, parameters in session.transaction.calls],
+            ["0001"],
+        )
+        self.assertEqual(counts["summaries_checked"], 1)
+        self.assertEqual(len(reviews), 1)
 
     def test_first_pass_summary_selection_searches_once_then_fetches_work(self):
         http = FakeOpenLibraryHttp(

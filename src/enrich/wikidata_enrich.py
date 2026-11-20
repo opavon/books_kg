@@ -61,7 +61,7 @@ WHERE b.book_id IS NOT NULL
        OR b.openlibrary_status = 'error'
      OR b.openlibrary_checked_at IS NULL
      OR b.openlibrary_checked_at < datetime() - duration({days: $stale_days}))
-   AND ($force_selected OR $refresh_summaries OR $summary_book_ids IS NULL OR b.book_id IN $summary_book_ids)
+   AND ($summary_book_ids IS NULL OR b.book_id IN $summary_book_ids)
   AND ($summary_statuses IS NULL OR b.openlibrary_status IN $summary_statuses)
 OPTIONAL MATCH (a:Author)-[:WROTE]->(b)
 RETURN b.book_id AS book_id, b.title AS title,
@@ -778,7 +778,7 @@ def run_enrichment(
    report_rows = report_rows or []
    report_index = {(row["type"], row["key"]): row for row in report_rows}
    query_statuses = None if report_rows else statuses
-   query_summary_statuses = None if report_rows else summary_statuses
+   query_summary_statuses = summary_statuses
    report_author_names = {row["key"] for row in report_rows if row["type"] == "author"}
    report_book_ids = {row["key"] for row in report_rows if row["type"] == "book"}
    report_summary_ids = {row["key"] for row in report_rows if row["type"] == "book_summary"}
